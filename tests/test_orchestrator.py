@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -12,8 +13,12 @@ from claude_agent_sdk import (
 )
 
 from blueprint.canvas import CanvasCategory
-from blueprint.discovery import RECORD_TOOL_FULL_NAME
+from blueprint.discovery import EXAMPLES_TOOL_FULL_NAME, RECORD_TOOL_FULL_NAME
+from blueprint.matching import DepartmentMatch, MatchError
 from blueprint.orchestrator import (
+    MATCH_FALLBACK_TURN,
+    MAX_MATCH_ATTEMPTS,
+    DepartmentsMatched,
     DiscoverySession,
     SessionNotStartedError,
     TextDelta,
@@ -21,13 +26,17 @@ from blueprint.orchestrator import (
     TurnCompleted,
     TurnProtocolError,
 )
+from blueprint.skills import SKILLS_DIR, load_skills
+
+SKILLS = load_skills(SKILLS_DIR)
 
 # --- a scripted stand-in for ClaudeSDKClient --------------------------------------------
 #
 # Each "script" entry is a list of steps for one turn. A step is either a str (assistant text)
-# or a dict (arguments for the record tool). The fake emits SDK message objects the way the
-# real client would, and *actually calls our tool handler* for dict steps, so the orchestrator's
-# turn-number injection and `captured` bookkeeping are exercised for real.
+# or a dict (tool-call arguments: with "summary" it is a record call, with only "category" it
+# is an examples call). The fake emits SDK message objects the way the real client would, and
+# *actually dispatches through the real in-process MCP server* for dict steps, so schema
+# validation, turn-number injection and `captured` bookkeeping are exercised for real.
 
 Step = str | dict[str, Any]
 
@@ -47,6 +56,12 @@ def result_message(
     )
 
 
+def _tool_step(step: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    if "summary" in step:
+        return RECORD_TOOL_FULL_NAME, step
+    return EXAMPLES_TOOL_FULL_NAME, step
+
+
 class FakeClient:
     def __init__(self, options: ClaudeAgentOptions, script: list[list[Step]]) -> None:
         self.options = options
@@ -58,6 +73,7 @@ class FakeClient:
         self.turn_cost = 0.01
         self.running_total = 0.0
         self.stream_chunk = 4  # chars per text_delta; mirrors the SDK's partial messages
+        self.tool_results: list[str] = []
 
     async def connect(self, prompt: Any = None) -> None:
         self.connected = True
@@ -85,6 +101,7 @@ class FakeClient:
                     )
                 yield AssistantMessage(content=[TextBlock(text=step)], model="fake")
             else:
+                tool_name, args = _tool_step(step)
                 yield self._stream_event(
                     {
                         "type": "content_block_start",
@@ -92,16 +109,16 @@ class FakeClient:
                         "content_block": {
                             "type": "tool_use",
                             "id": f"tu-{i}",
-                            "name": RECORD_TOOL_FULL_NAME,
+                            "name": tool_name,
                             "input": {},
                         },
                     }
                 )
                 yield AssistantMessage(
-                    content=[ToolUseBlock(id=f"tu-{i}", name=RECORD_TOOL_FULL_NAME, input=step)],
+                    content=[ToolUseBlock(id=f"tu-{i}", name=tool_name, input=args)],
                     model="fake",
                 )
-                await self._call_record_tool(step)
+                self.tool_results.append(await self._call_tool(tool_name, args))
         if not self.omit_result:
             self.running_total += self.turn_cost  # the SDK reports a running total
             yield result_message(cost=self.running_total)
@@ -110,17 +127,43 @@ class FakeClient:
     def _stream_event(event: dict[str, Any]) -> StreamEvent:
         return StreamEvent(uuid="ev", session_id="sess-1", event=event)
 
-    async def _call_record_tool(self, args: dict[str, Any]) -> None:
+    async def _call_tool(self, full_name: str, args: dict[str, Any]) -> str:
         """Dispatch through the real in-process MCP server, so the SDK's schema validation runs."""
         from mcp.types import CallToolRequestParams
 
         server: Any = self.options.mcp_servers
         entry = server["canvas"]["instance"].get_request_handler("tools/call")
-        params = CallToolRequestParams(name="record_canvas_answer", arguments=args)
-        await entry.handler(None, params)
+        params = CallToolRequestParams(name=full_name.split("__")[-1], arguments=args)
+        result = await entry.handler(None, params)
+        return str(result.content[0].text)
 
 
-def make_session(script: list[list[Step]]) -> tuple[DiscoverySession, list[FakeClient]]:
+class FakeMatcher:
+    """Stand-in for match_departments: records calls, returns a fixed match or raises."""
+
+    def __init__(self, departments: tuple[str, ...] = ("hr",), *, fail_times: int = 0) -> None:
+        self.departments = departments
+        self.fail_times = fail_times
+        self.calls: list[str] = []
+
+    async def __call__(self, transcript: str, skills: Any, *, model: str) -> DepartmentMatch:
+        self.calls.append(transcript)
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise MatchError("classifier down")
+        return DepartmentMatch(
+            departments=self.departments,
+            rationale="test",
+            model=model,
+            cost_usd=0.004,
+            duration_ms=50,
+            matched_at=datetime.now(UTC),
+        )
+
+
+def make_session(
+    script: list[list[Step]], matcher: FakeMatcher | None = None
+) -> tuple[DiscoverySession, list[FakeClient]]:
     created: list[FakeClient] = []
 
     def factory(options: ClaudeAgentOptions) -> Any:
@@ -128,7 +171,10 @@ def make_session(script: list[list[Step]]) -> tuple[DiscoverySession, list[FakeC
         created.append(client)
         return client
 
-    return DiscoverySession(client_factory=factory), created
+    session = DiscoverySession(
+        client_factory=factory, skills=SKILLS, match_fn=matcher or FakeMatcher()
+    )
+    return session, created
 
 
 # --- tests -------------------------------------------------------------------------------
@@ -301,12 +347,86 @@ class TestStreaming:
             )
             is None
         )
-        assert (
-            _translate_stream_event(
-                {"type": "content_block_start", "content_block": {"type": "text"}}
-            )
-            is None
-        )
+        text_start = {"type": "content_block_start", "content_block": {"type": "text"}}
+        assert _translate_stream_event(text_start) is None
+
+
+class TestDepartmentMatching:
+    async def test_runs_when_key_activities_is_captured(self) -> None:
+        matcher = FakeMatcher(("hr", "finance"))
+        script: list[list[Step]] = [
+            ["Who is involved?"],
+            [{"category": "key_stakeholders", "summary": "HR"}, "What is the process?"],
+            [{"category": "key_activities", "summary": "packets"}, "What is the pain?"],
+        ]
+        session, _ = make_session(script, matcher)
+        async with session:
+            await session.send("onboarding")
+            await session.send("HR team")
+            assert matcher.calls == []  # not yet: key_activities not captured
+            events = [e async for e in session.stream("we check packets")]
+
+        assert len(matcher.calls) == 1
+        assert "you> onboarding" in matcher.calls[0]
+        assert "assistant> Who is involved?" in matcher.calls[0]
+        assert session.match is not None
+        assert session.match.departments == ("hr", "finance")
+        kinds = [type(e).__name__ for e in events]
+        assert kinds.index("DepartmentsMatched") == kinds.index("TurnCompleted") - 1
+        assert isinstance(events[-2], DepartmentsMatched)
+
+    async def test_falls_back_to_turn_three_if_activities_not_captured(self) -> None:
+        matcher = FakeMatcher()
+        session, _ = make_session([["a"], ["b"], ["c"], ["d"]], matcher)
+        async with session:
+            for i in range(MATCH_FALLBACK_TURN - 1):
+                await session.send(str(i))
+                assert matcher.calls == []
+            await session.send("fallback turn")
+            assert len(matcher.calls) == 1
+            await session.send("one more")
+            assert len(matcher.calls) == 1  # runs once, not every turn
+
+    async def test_matched_skills_reflects_match_in_order(self) -> None:
+        session, _ = make_session([["a"], ["b"], ["c"]], FakeMatcher(("sales", "finance")))
+        async with session:
+            assert session.matched_skills() == []
+            for i in range(MATCH_FALLBACK_TURN):
+                await session.send(str(i))
+        assert [s.name for s in session.matched_skills()] == ["sales", "finance"]
+
+    async def test_failure_is_logged_retried_then_abandoned(self) -> None:
+        matcher = FakeMatcher(fail_times=MAX_MATCH_ATTEMPTS + 1)
+        session, _ = make_session([["a"]] * 6, matcher)
+        async with session:
+            for i in range(6):
+                result = await session.send(str(i))
+                assert not result.is_error  # discovery is unaffected
+        assert len(matcher.calls) == MAX_MATCH_ATTEMPTS
+        assert session.match is None
+
+    async def test_examples_tool_sees_matched_skills(self) -> None:
+        script: list[list[Step]] = [
+            [{"category": "system_integrations"}, "example please?"],  # before match
+            ["b"],
+            [{"category": "key_activities", "summary": "x"}, "c"],  # triggers match
+            [{"category": "system_integrations"}, "here are examples"],  # after match
+        ]
+        session, created = make_session(script, FakeMatcher(("customer_success",)))
+        async with session:
+            for text in ("1", "2", "3", "4"):
+                await session.send(text)
+        before, after = created[0].tool_results[0], created[0].tool_results[-1]
+        assert "No department profile" in before
+        assert "## customer_success" in after and "Zendesk" in after
+        assert "## hr" not in after
+
+    async def test_snapshot_includes_match(self) -> None:
+        session, _ = make_session([["a"], ["b"], ["c"]], FakeMatcher(("hr",)))
+        async with session:
+            for i in range(MATCH_FALLBACK_TURN):
+                await session.send(str(i))
+        assert session.to_dict()["match"]["departments"] == ["hr"]
 
 
 class TestSnapshot:
@@ -320,6 +440,7 @@ class TestSnapshot:
         snap = session.to_dict()
         assert snap["session_id"] == "sess-1"
         assert snap["is_complete"] is False
+        assert snap["match"] is None
         assert snap["canvas"]["current"]["key_stakeholders"] == "HR"
         assert snap["turns"][0]["captured"] == ["key_stakeholders"]
         assert snap["turns"][0]["tool_calls"][0]["name"] == RECORD_TOOL_FULL_NAME

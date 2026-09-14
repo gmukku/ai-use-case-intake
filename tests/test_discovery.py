@@ -1,15 +1,23 @@
+from typing import Any
+
 import jsonschema
 import pytest
 
 from blueprint.canvas import CATEGORY_QUESTIONS, CanvasCategory, CanvasState
 from blueprint.discovery import (
+    EXAMPLES_TOOL_FULL_NAME,
+    EXAMPLES_TOOL_NAME,
     RECORD_TOOL_FULL_NAME,
     RECORD_TOOL_NAME,
     RECORD_TOOL_SCHEMA,
     build_discovery_options,
+    build_examples_tool,
     build_record_tool,
     build_system_prompt,
 )
+from blueprint.skills import SKILLS_DIR, load_skills
+
+SKILLS = load_skills(SKILLS_DIR)
 
 
 class TestSystemPrompt:
@@ -29,8 +37,10 @@ class TestSystemPrompt:
         assert "[`output_format`] (multi-select)" in prompt
         assert "[`key_stakeholders`] (multi-select)" not in prompt
 
-    def test_names_the_record_tool(self) -> None:
-        assert f"`{RECORD_TOOL_NAME}`" in build_system_prompt()
+    def test_names_both_tools(self) -> None:
+        prompt = build_system_prompt()
+        assert f"`{RECORD_TOOL_NAME}`" in prompt
+        assert f"`{EXAMPLES_TOOL_NAME}`" in prompt
 
 
 class TestRecordToolSchema:
@@ -110,19 +120,47 @@ class TestRecordTool:
         assert state.entries == []
 
 
+class TestExamplesTool:
+    async def test_unmatched_returns_guidance_not_examples(self) -> None:
+        examples = build_examples_tool(lambda: [])
+        result = await examples.handler({"category": "system_integrations"})
+        text = result["content"][0]["text"]
+        assert "No department profile has been matched yet" in text
+        assert "Salesforce" not in text
+
+    async def test_matched_returns_only_matched_departments_for_that_category(self) -> None:
+        examples = build_examples_tool(lambda: [SKILLS["hr"], SKILLS["finance"]])
+        result = await examples.handler({"category": "system_integrations"})
+        text = result["content"][0]["text"]
+        assert "## hr" in text and "## finance" in text
+        assert "## sales" not in text and "## customer_success" not in text
+        assert "Workday" in text and "NetSuite" in text  # system-integration content
+        assert "Greenhouse" in text  # hr systems, not hr stakeholders
+        assert "Pick 2-4 and adapt" in text
+
+    async def test_match_is_read_at_call_time(self) -> None:
+        current: list[Any] = []
+        examples = build_examples_tool(lambda: list(current))
+        first = await examples.handler({"category": "output_format"})
+        current.append(SKILLS["sales"])
+        second = await examples.handler({"category": "output_format"})
+        assert "No department profile" in first["content"][0]["text"]
+        assert "## sales" in second["content"][0]["text"]
+
+
 class TestDiscoveryOptions:
     def test_isolation_and_tool_wiring(self) -> None:
-        options = build_discovery_options(CanvasState(), lambda: 0)
+        options = build_discovery_options(CanvasState(), lambda: 0, lambda: [])
         assert options.setting_sources == []
         assert options.tools == []
-        assert options.allowed_tools == [RECORD_TOOL_FULL_NAME]
+        assert options.allowed_tools == [RECORD_TOOL_FULL_NAME, EXAMPLES_TOOL_FULL_NAME]
         assert isinstance(options.system_prompt, str)
         assert options.include_partial_messages is True
         assert isinstance(options.mcp_servers, dict) and "canvas" in options.mcp_servers
 
     def test_budget_and_model_pass_through(self) -> None:
         options = build_discovery_options(
-            CanvasState(), lambda: 0, model="claude-sonnet-5", max_budget_usd=2.5
+            CanvasState(), lambda: 0, lambda: [], model="claude-sonnet-5", max_budget_usd=2.5
         )
         assert options.model == "claude-sonnet-5"
         assert options.max_budget_usd == 2.5

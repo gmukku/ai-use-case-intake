@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from blueprint.discovery import DEFAULT_MODEL
 from blueprint.observability import configure_logging
 from blueprint.orchestrator import (
+    DepartmentsMatched,
     DiscoverySession,
     TextDelta,
     ToolCallStarted,
@@ -56,6 +57,9 @@ async def _stream_turn(session: DiscoverySession, text: str) -> TurnResult:
                 print(chunk, end="", flush=True)
             case ToolCallStarted():
                 print("·", end="", flush=True)  # the UI equivalent is a typing indicator
+            case DepartmentsMatched(match=match):
+                # Admin-trace only; a requester UI would not render this.
+                print(f"\n  [matched: {', '.join(match.departments)}]", end="", flush=True)
             case TurnCompleted(result=result):
                 print()
                 return result

@@ -14,7 +14,7 @@ Later steps plug in here without changing the model-facing side:
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
@@ -32,6 +32,8 @@ from claude_agent_sdk import (
 
 from blueprint.canvas import CanvasCategory, CanvasState
 from blueprint.discovery import DEFAULT_MODEL, build_discovery_options
+from blueprint.matching import DepartmentMatch, MatchError, match_departments
+from blueprint.skills import SKILLS_DIR, DepartmentSkill, load_skills
 
 logger = logging.getLogger(__name__)
 
@@ -128,13 +130,28 @@ class ToolCallStarted:
 
 
 @dataclass(frozen=True, slots=True)
+class DepartmentsMatched:
+    """The classification pass ran during this turn. Admin/reviewer views only."""
+
+    match: DepartmentMatch
+
+
+@dataclass(frozen=True, slots=True)
 class TurnCompleted:
     """Terminal event for a turn; always the last one yielded."""
 
     result: TurnResult
 
 
-TurnEvent = TextDelta | ToolCallStarted | TurnCompleted
+TurnEvent = TextDelta | ToolCallStarted | DepartmentsMatched | TurnCompleted
+
+# Anything with match_departments()'s signature; injectable for tests.
+MatchFn = Callable[..., Awaitable[DepartmentMatch]]
+
+# Run the classifier no later than this turn even if key_activities is not yet captured.
+MATCH_FALLBACK_TURN = 3
+# Give up on classification after this many failed attempts; discovery continues without it.
+MAX_MATCH_ATTEMPTS = 2
 
 
 class DiscoverySession:
@@ -153,21 +170,39 @@ class DiscoverySession:
         self,
         *,
         model: str = DEFAULT_MODEL,
+        classifier_model: str = DEFAULT_MODEL,
         max_budget_usd: float | None = None,
+        skills: dict[str, DepartmentSkill] | None = None,
         client_factory: ClientFactory = ClaudeSDKClient,
+        match_fn: MatchFn = match_departments,
     ) -> None:
         self.state = CanvasState()
         self.turn = 0
         self.session_id: str | None = None
         self.total_cost_usd = 0.0
         self.turns: list[TurnResult] = []
-        # The tool reads the turn number through this lambda at call time, so a capture is
-        # always attributed to the stakeholder message that triggered it.
+        self.skills = skills if skills is not None else load_skills(SKILLS_DIR)
+        self.match: DepartmentMatch | None = None
+        self._classifier_model = classifier_model
+        self._match_fn = match_fn
+        self._match_attempts = 0
+        # The tools read turn number and matched skills through these lambdas at call time,
+        # so a capture is attributed to the right turn and examples reflect the latest match.
         self.options = build_discovery_options(
-            self.state, lambda: self.turn, model=model, max_budget_usd=max_budget_usd
+            self.state,
+            lambda: self.turn,
+            self.matched_skills,
+            model=model,
+            max_budget_usd=max_budget_usd,
         )
         self._client_factory = client_factory
         self._client: ClaudeSDKClient | None = None
+
+    def matched_skills(self) -> list[DepartmentSkill]:
+        """Department skills the classifier selected, in relevance order; empty until it runs."""
+        if self.match is None:
+            return []
+        return [self.skills[name] for name in self.match.departments if name in self.skills]
 
     # ------------------------------- lifecycle ----------------------------------
 
@@ -298,7 +333,47 @@ class DiscoverySession:
                 "missing": [c.value for c in self.state.missing()],
             },
         )
+        if self._should_match(captured):
+            match = await self._run_matching()
+            if match is not None:
+                yield DepartmentsMatched(match)
+
         yield TurnCompleted(turn_result)
+
+    # -- department matching -------------------------------------------------------------
+
+    def _should_match(self, captured_this_turn: tuple[CanvasCategory, ...]) -> bool:
+        """Classify once we know who and what (key_activities captured), or by the fallback turn."""
+        if self.match is not None or self._match_attempts >= MAX_MATCH_ATTEMPTS:
+            return False
+        know_who_and_what = CanvasCategory.KEY_ACTIVITIES in captured_this_turn
+        return know_who_and_what or self.turn >= MATCH_FALLBACK_TURN
+
+    async def _run_matching(self) -> DepartmentMatch | None:
+        """Run the classifier over the conversation so far. Failures are logged, never raised."""
+        self._match_attempts += 1
+        transcript = self.render_transcript()
+        try:
+            self.match = await self._match_fn(transcript, self.skills, model=self._classifier_model)
+        except MatchError as exc:
+            logger.error(
+                "matching.failed",
+                extra={"turn": self.turn, "attempt": self._match_attempts, "error": str(exc)},
+            )
+            return None
+        logger.info(
+            "session.matched",
+            extra={"turn": self.turn, "departments": list(self.match.departments)},
+        )
+        return self.match
+
+    def render_transcript(self) -> str:
+        """The conversation so far as plain text, for the classifier."""
+        lines = []
+        for t in self.turns:
+            lines.append(f"you> {t.user_text}")
+            lines.append(f"assistant> {t.assistant_text}")
+        return "\n".join(lines)
 
     async def send(self, user_text: str) -> TurnResult:
         """Non-streaming turn: drain ``stream`` and return the final ``TurnResult``."""
@@ -322,6 +397,7 @@ class DiscoverySession:
             "turn": self.turn,
             "total_cost_usd": self.total_cost_usd,
             "is_complete": self.is_complete,
+            "match": self.match.to_dict() if self.match else None,
             "canvas": self.state.to_dict(),
             "turns": [t.to_dict() for t in self.turns],
         }

@@ -24,6 +24,7 @@ from blueprint.canvas import (
     CanvasCategory,
     CanvasState,
 )
+from blueprint.skills import DepartmentSkill
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,12 @@ logger = logging.getLogger(__name__)
 CANVAS_SERVER_NAME: Final = "canvas"
 RECORD_TOOL_NAME: Final = "record_canvas_answer"
 RECORD_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{RECORD_TOOL_NAME}"
+EXAMPLES_TOOL_NAME: Final = "department_examples"
+EXAMPLES_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{EXAMPLES_TOOL_NAME}"
+
+# Callable the orchestrator supplies: which department skills currently apply (may be empty
+# before the classifier has run).
+MatchedSkills = Callable[[], list[DepartmentSkill]]
 
 DEFAULT_MODEL: Final = "claude-opus-5"
 
@@ -61,6 +68,19 @@ RECORD_TOOL_SCHEMA: Final[dict[str, Any]] = {
         },
     },
     "required": ["category", "summary"],
+    "additionalProperties": False,
+}
+
+EXAMPLES_TOOL_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "category": {
+            "type": "string",
+            "enum": [c.value for c in CanvasCategory],
+            "description": "The canvas category the stakeholder wants examples for.",
+        },
+    },
+    "required": ["category"],
     "additionalProperties": False,
 }
 
@@ -98,9 +118,11 @@ later category early, record it, but keep steering back to the current one.
 If you cannot, ask ONE focused follow-up grounded in what they have already said. Do not \
 interrogate: if an answer is reasonable, accept it and move on.
 - Ask one question at a time. Keep each message short and in plain language. No jargon.
-- If they ask for an example ("what do you mean by system integration?"), give 2-4 concrete \
-examples tailored to what they have told you so far (their team, their systems, their process). \
-Never give a generic list.
+- If they ask for an example ("what do you mean by system integration?"), first call \
+`{EXAMPLES_TOOL_NAME}` for the category you are on. It returns examples from department \
+profiles matched to their team. Pick 2-4 and adapt them to what they have told you so far \
+(their team, their systems, their process). Never paste the list verbatim, and never give a \
+generic list.
 - Stay strictly on discovery. Do not propose architectures, models, or vendors, and do not \
 promise what will be built.
 
@@ -165,9 +187,62 @@ def build_record_tool(state: CanvasState, current_turn: Callable[[], int]) -> Sd
     return record_canvas_answer
 
 
+def build_examples_tool(matched_skills: MatchedSkills) -> SdkMcpTool[Any]:
+    """Create the ``department_examples`` tool: per-category examples from matched departments.
+
+    Python decides which departments apply (the classifier's output, read at call time), so
+    the model never chooses a department itself. Every retrieval is logged with exactly what
+    was returned, which is what the audit layer needs.
+    """
+
+    @tool(
+        EXAMPLES_TOOL_NAME,
+        "Get concrete examples for a canvas category, drawn from department profiles matched "
+        "to this stakeholder. Call this before offering examples; adapt what it returns.",
+        EXAMPLES_TOOL_SCHEMA,
+    )
+    async def department_examples(args: dict[str, Any]) -> dict[str, Any]:
+        category = CanvasCategory(args["category"])
+        skills = matched_skills()
+        if not skills:
+            logger.info("discovery.examples.unmatched", extra={"category": category.value})
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "No department profile has been matched yet. Offer examples from "
+                            "your own judgment, grounded in what the stakeholder has said."
+                        ),
+                    }
+                ]
+            }
+
+        sections = []
+        for skill in skills:
+            bullets = "\n".join(f"- {b}" for b in skill.examples[category])
+            sections.append(f"## {skill.name}\n{bullets}")
+        logger.info(
+            "discovery.examples.retrieved",
+            extra={
+                "category": category.value,
+                "departments": [s.name for s in skills],
+                "count": sum(len(s.examples[category]) for s in skills),
+            },
+        )
+        text = (
+            f"Examples for {category.label} from matched department profiles. Pick 2-4 and "
+            "adapt them to this stakeholder; do not paste the list.\n\n" + "\n\n".join(sections)
+        )
+        return {"content": [{"type": "text", "text": text}]}
+
+    return department_examples
+
+
 def build_discovery_options(
     state: CanvasState,
     current_turn: Callable[[], int],
+    matched_skills: MatchedSkills,
     *,
     model: str = DEFAULT_MODEL,
     max_budget_usd: float | None = None,
@@ -177,12 +252,14 @@ def build_discovery_options(
     Args:
         state: The canvas log this session records into.
         current_turn: See :func:`build_record_tool`.
+        matched_skills: See :func:`build_examples_tool`.
         model: Model ID for the conversation.
         max_budget_usd: Optional hard spend cap for the whole session; the SDK stops the run
             when it is exceeded.
     """
     record = build_record_tool(state, current_turn)
-    server = create_sdk_mcp_server(name=CANVAS_SERVER_NAME, tools=[record])
+    examples = build_examples_tool(matched_skills)
+    server = create_sdk_mcp_server(name=CANVAS_SERVER_NAME, tools=[record, examples])
 
     return ClaudeAgentOptions(
         model=model,
@@ -192,8 +269,8 @@ def build_discovery_options(
         # No built-in tools at all (no Read/Bash/etc. schemas in context); only our MCP tool.
         tools=[],
         mcp_servers={CANVAS_SERVER_NAME: server},
-        # Pre-approve the one tool so it runs without a permission prompt.
-        allowed_tools=[RECORD_TOOL_FULL_NAME],
+        # Pre-approve our tools so they run without a permission prompt.
+        allowed_tools=[RECORD_TOOL_FULL_NAME, EXAMPLES_TOOL_FULL_NAME],
         max_turns=MAX_AGENTIC_TURNS_PER_QUERY,
         max_budget_usd=max_budget_usd,
         # Emit StreamEvents mid-turn so the orchestrator can stream text to the UI.
