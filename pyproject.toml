@@ -1,0 +1,53 @@
+[project]
+name = "blueprint-ai"
+version = "0.1.0"
+description = "Agentic discovery-to-prototype system built on the Claude Agent SDK"
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>=0.2.152",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-jsonschema>=4.26.0.20260518",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort, UP pyupgrade (modern syntax), B bugbear (likely bugs),
+# SIM simplify, N naming, RUF ruff-specific, D docstrings (Google style), ANN type annotations.
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "N", "RUF", "D", "ANN"]
+ignore = [
+    "D100",  # module docstring — enforced by convention, not the linter
+    "D104",  # package docstring
+    "D107",  # __init__ docstring — the class docstring covers it
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN"]     # tests document themselves via their names
+"examples/**" = ["D", "ANN"]  # SDK smoke scripts, kept as learning references
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["blueprint", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["claude_agent_sdk.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,0 +1,23 @@
+# secrets — never commit credentials
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# local data
+*.db
+*.sqlite
+
+# node (later, for the Next.js frontend)
+node_modules/
+.next/
+
+# local run artifacts (hand-test snapshots and logs); promote to fixtures deliberately, not by default
+runs/
+logs/

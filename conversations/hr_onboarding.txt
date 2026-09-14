@@ -1,0 +1,12 @@
+# Synthetic HR stakeholder. One message per line; '#' lines are ignored.
+# Deliberately vague early on, asks for an example once, adds a late detail near the end.
+Hi, I run onboarding for new hires and the paperwork side of it is a mess. I'd love some kind of AI help with it.
+It's mostly me and two coordinators on the HR ops team. The hiring managers depend on us too because they wait on us before the new hire can start.
+Right now a coordinator opens each new hire's packet, checks the I-9 and W-4 and the direct deposit form are filled in, and if anything's missing they email the person. We do maybe 30 to 40 new hires a month, so it's daily work.
+Honestly it's time. Each packet takes 20 to 30 minutes to check and we still miss things sometimes, which causes payroll problems later. If we could cut that in half and stop missing fields that would be huge.
+What do you mean by other systems? Can you give me an example?
+Okay yes. The forms come in through our onboarding tool and the completed data has to end up in our HRIS for payroll. We also keep the signed PDFs in SharePoint.
+The knowledge part would be our internal onboarding checklist that lives in SharePoint, and the state-specific requirements doc we keep there too.
+The inputs are the scanned or e-signed PDFs of the forms, and sometimes a coordinator would type a question like "is this packet complete?"
+Oh, one more thing about who's involved, our payroll specialist also reviews the packet before the first pay run, I forgot to mention her.
+I think mainly I want it to tell me what's missing in a packet, like a checklist result, and maybe answer questions about the requirements. I don't need it to fill anything in.
