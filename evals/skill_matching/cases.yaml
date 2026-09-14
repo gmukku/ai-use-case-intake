@@ -1,0 +1,182 @@
+# Gold set for the department classifier.
+#
+# Each case is the first 2-3 exchanges of a discovery conversation (what the classifier
+# actually sees) and the department set a human says is correct. Labels are the judge here;
+# no LLM grades anything. Edit `expected` freely; `note` records the labeling rationale.
+#
+# Departments: hr, finance, sales, customer_success. Order in `expected` does not matter.
+
+- id: hr_onboarding_packets
+  expected: [hr, finance]
+  note: |
+    Originally labeled [hr] with payroll treated as a downstream consumer. Both models
+    returned [hr, finance] on 6/6 runs, citing "payroll needs it clean before the first pay
+    run": the transcript names payroll's process explicitly, so finance's profile (payroll
+    systems, pay-run timing) is relevant. Relabeled 2026-09-14.
+  transcript: |
+    you> I run onboarding for new hires and the paperwork side is a mess.
+    assistant> Who touches that paperwork today?
+    you> Me and two HR ops coordinators. Hiring managers wait on us, and payroll needs it clean before the first pay run.
+
+- id: hr_pto_policy_chatbot
+  expected: [hr]
+  note: Clean HR. Employees asking policy questions is HR's inquiry load.
+  transcript: |
+    you> Employees keep emailing us the same questions about PTO accrual and parental leave.
+    assistant> Who answers those today?
+    you> Two HR generalists. It's probably 40 emails a week and the answers are all in the handbook.
+
+- id: hr_interview_scheduling
+  expected: [hr]
+  note: Clean HR (talent acquisition). Hiring managers are participants, not a department.
+  transcript: |
+    you> Our recruiters spend hours coordinating interview slots between candidates and hiring managers.
+    assistant> How many roles are open at a time?
+    you> Usually 15 to 20. Three recruiters, all in Greenhouse, calendars in Outlook.
+
+- id: finance_invoice_matching
+  expected: [finance]
+  note: Clean Finance (AP).
+  transcript: |
+    you> Every invoice that comes in has to be matched to a PO and a receipt before anyone approves it.
+    assistant> Who does that matching?
+    you> Two AP specialists. Around 600 invoices a month, all in NetSuite, and the mismatches are what eat the time.
+
+- id: finance_variance_commentary
+  expected: [finance]
+  note: Clean Finance (FP&A).
+  transcript: |
+    you> Each month I write the variance commentary for the board pack and it takes me two full days.
+    assistant> What goes into it?
+    you> Actuals vs budget by department out of Adaptive, then I explain anything over 10% off.
+
+- id: finance_collections_emails
+  expected: [finance]
+  note: Clean Finance (AR). Customers are counterparties, not customer success work.
+  transcript: |
+    you> We chase overdue invoices by hand. Someone pulls the aging report and writes reminder emails one by one.
+    assistant> How often?
+    you> Weekly. One AR person, maybe 80 accounts past due at any time.
+
+- id: sales_demo_followups
+  expected: [sales]
+  note: Clean Sales.
+  transcript: |
+    you> I want help drafting follow-up emails after demos. Reps put it off and the follow-ups are inconsistent.
+    assistant> Who would use this?
+    you> Four account executives. Call recordings are in Gong, deals in Salesforce.
+
+- id: sales_rfp_answers
+  expected: [sales]
+  note: Clean Sales. Solutions engineers support sales; still sales work.
+  transcript: |
+    you> RFPs take us a week each. Most questions we've answered before but nobody can find the old answers.
+    assistant> Who works on them?
+    you> An AE plus a solutions engineer. We keep past responses in Google Drive.
+
+- id: sales_precall_research
+  expected: [sales]
+  note: Clean Sales (SDR prep).
+  transcript: |
+    you> Before a first call our SDRs research the company for 30 minutes and it's mostly copy-paste from LinkedIn and the website.
+    assistant> How many first calls a week?
+    you> Team of six SDRs, maybe 100 calls a week between them.
+
+- id: cs_ticket_reply_drafts
+  expected: [customer_success]
+  note: Clean CS (support).
+  transcript: |
+    you> Our support agents answer the same questions over and over. I want to draft replies from the knowledge base.
+    assistant> Who would use it?
+    you> Eight agents in Zendesk. About 300 tickets a day.
+
+- id: cs_qbr_prep
+  expected: [customer_success]
+  note: Clean CS. QBR prep is a CSM task even though renewals are downstream.
+  transcript: |
+    you> CSMs spend a day building each QBR deck from usage data and past notes.
+    assistant> How many QBRs a quarter?
+    you> Five CSMs, about 12 accounts each, so 60 decks a quarter. Data is in Gainsight and Pendo.
+
+- id: cs_bug_triage_to_engineering
+  expected: [customer_success]
+  note: Clean CS. Engineering receives the output but is not one of our departments.
+  transcript: |
+    you> When a ticket is really a bug, the agent has to rewrite it into a Jira issue for engineering and it's slow and inconsistent.
+    assistant> Who does the rewrite?
+    you> Tier-2 support, two people. Maybe 20 bugs a week.
+
+- id: overlap_vendor_onboarding
+  expected: [finance]
+  note: |
+    Debatable. W-9 and banking setup is AP work; "procurement" is not one of our four
+    departments. If you think the vendor-relationship side implies a second department,
+    change this.
+  transcript: |
+    you> I want to automate vendor onboarding. New vendors send a W-9 and banking details and someone has to set them up.
+    assistant> Who is involved?
+    you> Procurement collects the paperwork, then AP enters them in NetSuite before we can pay the first invoice.
+
+- id: overlap_commission_disputes
+  expected: [sales, finance]
+  note: Reps dispute, finance calculates. Both are the work.
+  transcript: |
+    you> Commission disputes take forever. A rep says a deal was credited wrong and it takes finance days to trace it.
+    assistant> Who is involved?
+    you> The AE, their manager, and our revenue accountant who runs the comp plan in a spreadsheet off Salesforce data.
+
+- id: overlap_churn_alerts
+  expected: [customer_success, sales]
+  note: CSMs act first; AEs are pulled in for renewal and expansion.
+  transcript: |
+    you> We want an alert when a customer looks like they might churn so someone can reach out before renewal.
+    assistant> Who would act on it?
+    you> Our CSMs mostly, but the AE who sold the account gets pulled in for expansion or renewal conversations.
+
+- id: overlap_expense_policy_chatbot
+  expected: [finance]
+  note: |
+    All employees ask, but the policy and the answers belong to finance. HR is not involved
+    in expense policy at most companies. Change to [finance, hr] if you disagree.
+  transcript: |
+    you> People ask what's reimbursable constantly. I want a chatbot over the expense policy.
+    assistant> Who fields those questions now?
+    you> The AP team, mostly, and it's a distraction from processing in Concur.
+
+- id: overlap_w4_changes
+  expected: [hr, finance]
+  note: HR collects the form and updates the record; payroll (finance) processes it.
+  transcript: |
+    you> When an employee updates their W-4 or direct deposit, HR keys it into the HRIS and payroll re-enters it. Things get missed.
+    assistant> Who is on each side?
+    you> An HR coordinator on our side and the payroll specialist in finance.
+
+- id: overlap_renewal_quotes
+  expected: [sales, customer_success]
+  note: CSM owns the relationship and flags the renewal; the quote is a sales artifact.
+  transcript: |
+    you> Renewal quotes are late. The CSM knows the renewal is coming but the AE has to build the quote and they're busy with new business.
+    assistant> Who would use a tool here?
+    you> CSMs to trigger it, AEs to review. Quotes are in Salesforce CPQ.
+
+- id: three_way_post_sale_handoff
+  expected: [sales, customer_success, finance]
+  note: |
+    Handoff from AE to CSM, plus the invoicing setup. Three genuine departments. If you
+    think finance is incidental here, drop it; this is the case that tests over-selection.
+  transcript: |
+    you> After a deal closes there's a mess: the AE hands off to a CSM, and finance has to set up invoicing, and details get lost between the three.
+    assistant> What details go missing?
+    you> Contract terms, billing contact, what was promised in the demo. Everyone re-asks the customer.
+
+- id: ambiguous_it_helpdesk
+  expected: [customer_success]
+  note: |
+    Genuinely ambiguous. Internal IT helpdesk is not one of our four. It is *shaped* like
+    support (tickets, KB, SLAs), so CS is the nearest profile. An acceptable alternative is
+    to treat this as out of scope and expect the classifier to pick the closest anyway. Your
+    call on the label; the interesting metric is whether models agree with each other here.
+  transcript: |
+    you> Our internal IT helpdesk gets swamped with password resets and "how do I" questions from employees.
+    assistant> Who handles those?
+    you> Two IT support people, tickets in Jira Service Management, and there is a wiki nobody reads.

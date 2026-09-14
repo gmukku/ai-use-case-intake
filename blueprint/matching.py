@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 import jsonschema
-from claude_agent_sdk import ClaudeAgentOptions, Message, ResultMessage, query
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, Message, ResultMessage, query
 
 from blueprint.discovery import DEFAULT_MODEL
 from blueprint.skills import DepartmentSkill
@@ -26,6 +26,7 @@ from blueprint.skills import DepartmentSkill
 logger = logging.getLogger(__name__)
 
 MAX_MATCHES: Final = 3
+CLASSIFIER_MAX_TURNS: Final = 3
 
 # Anything with query()'s signature: (prompt, options) -> async iterator of SDK messages.
 QueryFn = Callable[..., AsyncIterator[Message]]
@@ -145,16 +146,24 @@ async def match_departments(
         system_prompt=CLASSIFIER_SYSTEM_PROMPT,
         setting_sources=[],
         tools=[],
-        max_turns=1,
+        # Structured output is delivered through a hidden tool round-trip, so a single
+        # agentic turn is not enough; 1 was intermittently hit in the benchmark.
+        max_turns=CLASSIFIER_MAX_TURNS,
         effort="low",  # small, well-specified job; depth buys nothing here
         output_format={"type": "json_schema", "schema": schema},
     )
 
     started = datetime.now(UTC)
     result: ResultMessage | None = None
-    async for message in query_fn(prompt=build_match_prompt(skills, transcript), options=options):
-        if isinstance(message, ResultMessage):
-            result = message
+    try:
+        async for message in query_fn(
+            prompt=build_match_prompt(skills, transcript), options=options
+        ):
+            if isinstance(message, ResultMessage):
+                result = message
+    except ClaudeSDKError as exc:
+        # Translate SDK failures at the boundary so callers only ever handle MatchError.
+        raise MatchError(f"classifier run failed: {exc}") from exc
 
     if result is None:
         raise MatchError("classifier produced no ResultMessage")

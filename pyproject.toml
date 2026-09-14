@@ -40,12 +40,13 @@ convention = "google"
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["D", "ANN"]     # tests document themselves via their names
 "examples/**" = ["D", "ANN"]  # SDK smoke scripts, kept as learning references
+"evals/**" = ["D"]            # eval scripts: annotated, but per-function docstrings are noise
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
-files = ["blueprint", "tests"]
+files = ["blueprint", "tests", "evals"]
 
 [[tool.mypy.overrides]]
 module = ["claude_agent_sdk.*"]

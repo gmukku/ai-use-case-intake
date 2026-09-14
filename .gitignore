@@ -21,3 +21,6 @@ node_modules/
 # local run artifacts (hand-test snapshots and logs); promote to fixtures deliberately, not by default
 runs/
 logs/
+
+# eval run outputs (raw per-call results); summaries get written up, not committed
+evals/**/results/

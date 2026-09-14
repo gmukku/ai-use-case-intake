@@ -91,7 +91,7 @@ class TestMatchDepartments:
         options = q.calls[0]["options"]
         assert options.setting_sources == []
         assert options.tools == []
-        assert options.max_turns == 1
+        assert options.max_turns == 3
         assert options.effort == "low"
         assert options.output_format["type"] == "json_schema"
         assert "hr" in options.output_format["schema"]["properties"]["departments"]["items"]["enum"]
@@ -108,6 +108,17 @@ class TestMatchDepartments:
         q = fake_query({"departments": ["legal"], "rationale": "contracts"})
         with pytest.raises(MatchError, match="schema validation"):
             await match_departments("contracts", SKILLS, query_fn=q)
+
+    async def test_sdk_exception_becomes_match_error(self) -> None:
+        from claude_agent_sdk import ResultError
+
+        async def exploding(*, prompt: str, options: Any) -> AsyncIterator[Any]:
+            if prompt:  # always true; keeps this an async generator without dead code
+                raise ResultError("Reached maximum number of turns (1)")
+            yield
+
+        with pytest.raises(MatchError, match="maximum number of turns"):
+            await match_departments("anything", SKILLS, query_fn=exploding)
 
     async def test_error_result_raises(self) -> None:
         q = fake_query(None, is_error=True)
