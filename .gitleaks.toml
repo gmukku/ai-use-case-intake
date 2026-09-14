@@ -1,0 +1,30 @@
+# Project secret-scanning rules. Extends gitleaks' defaults; picked up automatically by the
+# pre-commit hook and by gitleaks-action in CI.
+#
+# The default anthropic-api-key rule matches one exact key shape (93 chars + "AA"). The rules
+# below are deliberately looser so a key of a different vintage or length is still caught, and
+# they add the providers this project actually uses.
+
+title = "blueprint-ai"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-api-key-loose"
+description = "Anthropic API key (any sk-ant- prefix, any length)"
+regex = '''\bsk-ant-[a-z0-9]+-[A-Za-z0-9_\-]{32,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "tavily-api-key"
+description = "Tavily API key"
+regex = '''\btvly-[A-Za-z0-9_\-]{20,}'''
+keywords = ["tvly-"]
+
+[allowlist]
+description = "Placeholders and fixtures that intentionally look like keys"
+paths = [
+  '''\.env\.example$''',
+  '''tests/test_settings\.py$''',   # uses "sk-ant-test" / "tvly-x" as obviously fake values
+]
