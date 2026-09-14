@@ -31,8 +31,10 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 | 2026-09-14 | — | This learning log, and the CLAUDE.md rule to keep it current. | `ac08c32` |
 | 2026-09-14 | — | Scoped web search (Tavily) as an in-process tool with a domain allowlist, plus a `PreToolUse` hook capping calls per session. First hook. Live run: one search, generic query, USCIS-only results, cited in the recorded summary. | `f4ffa8e` |
 
-State at last update: 134 tests, ruff + mypy `--strict` clean, steps 1–2 of 13 complete plus
-hardening and web search. Next: step 3 (SOP stdio MCP server).
+| 2026-09-14 | 3 | SOP library as an external stdio MCP server: eight synthetic SOPs, strict loader, IDF-weighted keyword search, `MCPServer` over stdio, wired via the SDK's `mcp_servers` stdio config next to the in-process canvas server. Live run: on "our onboarding checklist" the agent searched and read the packet-review SOP on turn 1, then asked whether the I-9 document inspection is part of the checklist pass. | `66c30bf` |
+
+State at last update: 159 tests, ruff + mypy `--strict` clean, steps 1–3 of 13 complete plus
+hardening and web search. Next: step 4 (completeness check and clarification loop).
 
 ---
 
@@ -87,6 +89,19 @@ constraint at the schema layer. A handler returns `{"content": [...]}` and may s
 `"is_error": True` to hand the model an actionable message. **Testing:** the in-process server
 exposes `get_request_handler("tools/call")`, so tests dispatch through the real MCP layer and
 get schema validation for free. *`blueprint/discovery.py`, `tests/test_orchestrator.py`*
+
+### External MCP servers over stdio
+**What:** the same `mcp_servers` dict that holds in-process servers also takes
+`{"type": "stdio", "command": ..., "args": [...], "env": {...}}`. The CLI subprocess spawns
+the server, does the MCP handshake, and exposes its tools as `mcp__<server>__<tool>`, so
+`allowed_tools` and the trace treat them identically to in-process tools. **Here:** the SOP
+library, launched as `<venv python> -m blueprint.sop_server` with `PYTHONPATH` set so the
+package imports from any cwd. This is the client side of the PrismHR-server pattern.
+**Gotchas:** (1) `mcp` 2.x renamed `FastMCP` to `MCPServer`; a v1-era prior would have
+failed on import. (2) A stdio server must never write to stdout: it is the transport; log
+to stderr. (3) Test the server with the `mcp` client (`stdio_client` + `ClientSession`)
+before wiring it into the SDK, so a wiring failure is a config problem, not a code problem.
+*`blueprint/sop_server.py`, `blueprint/discovery.py` `sop_server_config`, `tests/test_sops.py`*
 
 ### Streaming: `include_partial_messages`
 **What:** opt-in; forwards the raw API stream events as `StreamEvent` objects, interleaved
@@ -212,6 +227,21 @@ follow-up, never answers the stakeholder; queries must be generic; off by defaul
 off in evals so gold outcomes stay reproducible. The one-line rule that carries the design:
 *grounding for questions, not answers.*
 
+### Two grounding mechanisms, two jobs
+Department skills are a fixed taxonomy served as *examples* (who, what systems, what outputs);
+SOPs are *content* that changes and grows, served as *lookups*. Skills are loaded once and
+selected by the classifier; SOPs are searched on demand when the stakeholder references an
+existing process. Both feed the same behavior, sharper follow-ups, and both are cited in the
+recorded summary so the reviewer can see what informed a capture. The stakeholder remains the
+authority on what actually happens; a document is a prompt for a better question, not truth.
+
+### Deterministic retrieval where the corpus is small
+Eight documents do not justify embeddings. Keyword scoring with field weights (title >
+summary > body), IDF term weighting so rare terms dominate generic ones, a phrase bonus, and
+id tie-breaks give a ranker whose results are reproducible in tests and evals. The first
+version without IDF ranked a QBR SOP above the I-9 SOP for a query full of "business days";
+the fix was in the ranker, not the test.
+
 ### Classifier model chosen by benchmark, not by default
 20 labeled cases × 3 repeats. Opus 95% exact / 0 unstable; Sonnet 91.7% / 1 unstable. Kept
 Opus because *stability* is the property that matters for a once-per-conversation decision
@@ -246,6 +276,8 @@ project rules were added. "It's configured" is not evidence.
 | Windows console encoding crashed the CLI on `✓`, and the crash happened before the snapshot was written. | Force UTF-8 on stdout; write the most valuable output in a `finally`. |
 | Ran the real classifier from a unit test by accident (default `match_fn`). | Every external dependency needs an injection point with a fake default in the test helper. |
 | Typed the hook's return as `dict[str, Any]`; mypy rejected it against the SDK's `HookJSONOutput` union. | When an SDK publishes TypedDicts for a contract, use them: the type error is the documentation. |
+| Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
+| Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 
 ---
 
