@@ -38,6 +38,7 @@ from blueprint.canvas import CanvasCategory, CanvasState
 from blueprint.discovery import DEFAULT_MODEL, build_discovery_options
 from blueprint.matching import DepartmentMatch, MatchError, match_departments
 from blueprint.skills import SKILLS_DIR, DepartmentSkill, load_skills
+from blueprint.websearch import DEFAULT_MAX_SEARCHES_PER_SESSION, SearchClient, WebSearchGuard
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,8 @@ class DiscoverySession:
         client_factory: ClientFactory = ClaudeSDKClient,
         match_fn: MatchFn = match_departments,
         idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
+        web_search: SearchClient | None = None,
+        max_web_searches: int = DEFAULT_MAX_SEARCHES_PER_SESSION,
     ) -> None:
         self.state = CanvasState()
         self.turn = 0
@@ -214,6 +217,10 @@ class DiscoverySession:
         self._classifier_model = classifier_model
         self._match_fn = match_fn
         self._match_attempts = 0
+        # The guard is owned here (not inside discovery.py) so its attempts are in the snapshot.
+        self.web_search_guard = (
+            WebSearchGuard(max_calls=max_web_searches) if web_search is not None else None
+        )
         # The tools read turn number and matched skills through these lambdas at call time,
         # so a capture is attributed to the right turn and examples reflect the latest match.
         self.options = build_discovery_options(
@@ -222,6 +229,8 @@ class DiscoverySession:
             self.matched_skills,
             model=model,
             max_budget_usd=max_budget_usd,
+            web_search=web_search,
+            web_search_guard=self.web_search_guard,
         )
         self._client_factory = client_factory
         self._client: ClaudeSDKClient | None = None
@@ -492,6 +501,7 @@ class DiscoverySession:
             "is_complete": self.is_complete,
             "failure": self.failure,
             "match": self.match.to_dict() if self.match else None,
+            "web_search": self.web_search_guard.to_dict() if self.web_search_guard else None,
             "canvas": self.state.to_dict(),
             "turns": [t.to_dict() for t in self.turns],
         }

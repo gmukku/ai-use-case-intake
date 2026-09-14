@@ -34,6 +34,7 @@ from blueprint.orchestrator import (
     TurnResult,
 )
 from blueprint.settings import Settings, SettingsError, load_settings
+from blueprint.websearch import TavilyClient
 
 RUNS_DIR = Path("runs")
 LOG_FILE = Path("logs") / "discovery.jsonl"
@@ -57,8 +58,9 @@ async def _stream_turn(session: DiscoverySession, text: str) -> TurnResult:
         match event:
             case TextDelta(text=chunk):
                 print(chunk, end="", flush=True)
-            case ToolCallStarted():
-                print("·", end="", flush=True)  # the UI equivalent is a typing indicator
+            case ToolCallStarted(name=name):
+                # The UI equivalent is a typing indicator; the CLI shows which tool for the trace.
+                print("⌕" if name.endswith("web_search") else "·", end="", flush=True)
             case DepartmentsMatched(match=match):
                 # Admin-trace only; a requester UI would not render this.
                 print(f"\n  [matched: {', '.join(match.departments)}]", end="", flush=True)
@@ -92,11 +94,17 @@ def _prompt_lines() -> Iterator[str]:
 async def run(settings: Settings, *, script: Path | None) -> int:
     """Drive one session; return a process exit code."""
     messages = _script_lines(script) if script else _prompt_lines()
+    search = (
+        TavilyClient(settings.tavily_api_key)
+        if settings.web_search_enabled and settings.tavily_api_key
+        else None
+    )
     session = DiscoverySession(
         model=settings.model,
         classifier_model=settings.classifier_model,
         max_budget_usd=settings.max_budget_usd,
         idle_timeout_s=settings.idle_timeout_s,
+        web_search=search,
     )
 
     try:
@@ -117,6 +125,8 @@ async def run(settings: Settings, *, script: Path | None) -> int:
                     print("\n  [canvas complete]")
                     break
     finally:
+        if search is not None:
+            await search.aclose()
         # The snapshot is the most valuable output of a run; write it no matter what.
         RUNS_DIR.mkdir(exist_ok=True)
         out = RUNS_DIR / f"{session.session_id or 'no-session'}.json"

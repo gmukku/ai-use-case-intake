@@ -1,0 +1,9 @@
+# HR stakeholder who mentions a regulatory requirement (I-9 timing). Exercises web_search.
+Hi, I handle new hire paperwork and the I-9 process specifically is stressing me out. We keep getting it wrong.
+It's me and one other HR coordinator. The hiring managers and the new hires themselves are the other people involved, plus payroll needs the packet before the first pay run.
+The new hire fills out Section 1 on or before day one, then one of us has to look at their documents and complete Section 2. We do about 25 hires a month. Sometimes we complete Section 2 late because the manager forgot to schedule the document check.
+The problem is compliance risk. If we miss the deadline we're exposed in an audit, and it's also just time, maybe 30 minutes per hire chasing people.
+The forms live in our onboarding tool, and we keep copies in SharePoint. Payroll is in ADP.
+Our internal I-9 checklist and the list of acceptable documents are both in SharePoint.
+Inputs would be the scanned ID documents and the completed form, and sometimes a coordinator typing "is this I-9 complete?"
+I want it to tell me what's missing or late on each I-9, like a checklist with deadlines, and a way to ask questions about which documents are acceptable.

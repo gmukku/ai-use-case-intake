@@ -10,14 +10,21 @@ from blueprint.discovery import (
     RECORD_TOOL_FULL_NAME,
     RECORD_TOOL_NAME,
     RECORD_TOOL_SCHEMA,
+    WEB_SEARCH_TOOL_FULL_NAME,
     build_discovery_options,
     build_examples_tool,
     build_record_tool,
     build_system_prompt,
 )
 from blueprint.skills import SKILLS_DIR, load_skills
+from blueprint.websearch import SearchResult, WebSearchGuard
 
 SKILLS = load_skills(SKILLS_DIR)
+
+
+class _NoopSearch:
+    async def search(self, query: str) -> list[SearchResult]:
+        return []
 
 
 class TestSystemPrompt:
@@ -157,6 +164,27 @@ class TestDiscoveryOptions:
         assert isinstance(options.system_prompt, str)
         assert options.include_partial_messages is True
         assert isinstance(options.mcp_servers, dict) and "canvas" in options.mcp_servers
+
+    def test_web_search_off_by_default(self) -> None:
+        options = build_discovery_options(CanvasState(), lambda: 0, lambda: [])
+        assert WEB_SEARCH_TOOL_FULL_NAME not in options.allowed_tools
+        assert options.hooks is None
+        assert "web_search" not in str(options.system_prompt)
+
+    def test_web_search_wires_tool_prompt_and_hook_together(self) -> None:
+        guard = WebSearchGuard(max_calls=2)
+        options = build_discovery_options(
+            CanvasState(), lambda: 0, lambda: [], web_search=_NoopSearch(), web_search_guard=guard
+        )
+        assert WEB_SEARCH_TOOL_FULL_NAME in options.allowed_tools
+        assert options.hooks is not None
+        matchers = options.hooks["PreToolUse"]
+        assert len(matchers) == 1 and matchers[0].matcher == WEB_SEARCH_TOOL_FULL_NAME
+        assert matchers[0].hooks == [guard.hook]
+        prompt = str(options.system_prompt)
+        assert "# Web search (regulatory grounding only)" in prompt
+        assert "at most 2 times" in prompt
+        assert "never include names, company details" in prompt
 
     def test_budget_and_model_pass_through(self) -> None:
         options = build_discovery_options(

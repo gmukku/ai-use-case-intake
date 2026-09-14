@@ -532,6 +532,31 @@ class TestFailureContainment:
 
 
 class TestSnapshot:
+    async def test_web_search_guard_in_snapshot_when_enabled(self) -> None:
+        class NoopSearch:
+            async def search(self, query: str) -> list[Any]:
+                return []
+
+        created: list[FakeClient] = []
+
+        def factory(options: ClaudeAgentOptions) -> Any:
+            client = FakeClient(options, [["hi"]])
+            created.append(client)
+            return client
+
+        session = DiscoverySession(
+            client_factory=factory,
+            skills=SKILLS,
+            match_fn=FakeMatcher(),
+            web_search=NoopSearch(),
+            max_web_searches=2,
+        )
+        async with session:
+            await session.send("x")
+        assert session.to_dict()["web_search"] == {"max_calls": 2, "attempts": []}
+        assert session.web_search_guard is not None
+        assert "web_search" in str(created[0].options.system_prompt)
+
     async def test_to_dict_contains_canvas_and_turns(self) -> None:
         script: list[list[Step]] = [
             [{"category": "key_stakeholders", "summary": "HR"}, "Next question?"]
@@ -543,6 +568,7 @@ class TestSnapshot:
         assert snap["session_id"] == "sess-1"
         assert snap["is_complete"] is False
         assert snap["match"] is None
+        assert snap["web_search"] is None  # off by default
         assert snap["canvas"]["current"]["key_stakeholders"] == "HR"
         assert snap["turns"][0]["captured"] == ["key_stakeholders"]
         assert snap["turns"][0]["tool_calls"][0]["name"] == RECORD_TOOL_FULL_NAME

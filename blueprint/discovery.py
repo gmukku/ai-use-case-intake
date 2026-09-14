@@ -16,7 +16,14 @@ import logging
 from collections.abc import Callable
 from typing import Any, Final
 
-from claude_agent_sdk import ClaudeAgentOptions, SdkMcpTool, create_sdk_mcp_server, tool
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    HookMatcher,
+    SdkMcpTool,
+    create_sdk_mcp_server,
+    tool,
+)
+from claude_agent_sdk.types import HookEvent
 
 from blueprint.canvas import (
     CATEGORY_QUESTIONS,
@@ -25,6 +32,10 @@ from blueprint.canvas import (
     CanvasState,
 )
 from blueprint.skills import DepartmentSkill
+from blueprint.websearch import (
+    TOOL_NAME as WEB_SEARCH_TOOL_NAME,
+)
+from blueprint.websearch import SearchClient, WebSearchGuard, build_web_search_tool
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +47,7 @@ RECORD_TOOL_NAME: Final = "record_canvas_answer"
 RECORD_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{RECORD_TOOL_NAME}"
 EXAMPLES_TOOL_NAME: Final = "department_examples"
 EXAMPLES_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{EXAMPLES_TOOL_NAME}"
+WEB_SEARCH_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{WEB_SEARCH_TOOL_NAME}"
 
 # Callable the orchestrator supplies: which department skills currently apply (may be empty
 # before the classifier has run).
@@ -94,12 +106,30 @@ def _render_canvas_section() -> str:
     return "\n".join(lines)
 
 
-def build_system_prompt() -> str:
+def _web_search_section(max_searches: int) -> str:
+    return f"""
+
+# Web search (regulatory grounding only)
+
+You may call `{WEB_SEARCH_TOOL_NAME}` at most {max_searches} times in this conversation, and \
+only when the stakeholder mentions a government or regulatory requirement (tax or employment \
+forms, leave laws, filing deadlines, eligibility rules). Use what you find to ask ONE sharper \
+follow-up, e.g. whether a specific requirement is part of their process. Never use it to \
+answer the stakeholder's questions or to give advice. Queries must be generic public-topic \
+phrases; never include names, company details, or anything the stakeholder said verbatim. \
+If you rely on a result, mention the source title in the recorded summary."""
+
+
+def build_system_prompt(*, web_search_max: int | None = None) -> str:
     """Build the discovery system prompt from the canvas definition.
 
     Derived from ``canvas.py`` rather than hand-written so the prompt and the state machine
     can never disagree about what the categories are.
+
+    Args:
+        web_search_max: When set, adds the scoped web-search section with this per-session cap.
     """
+    extra = _web_search_section(web_search_max) if web_search_max is not None else ""
     return f"""You are a discovery consultant helping a non-technical stakeholder shape an idea \
 for an AI or automation use case. Your job is to run a structured discovery conversation, \
 then hand a clear spec to a human reviewer. You do not build anything.
@@ -134,7 +164,7 @@ category if they later add or change something. You may record more than one cat
 single turn if their message covered several.
 
 The stakeholder must never know this bookkeeping exists. Never mention categories, the canvas, \
-tools, recording, summaries, or reviewers in your messages until the end.
+tools, recording, summaries, or reviewers in your messages until the end.{extra}
 
 # Finishing
 
@@ -246,6 +276,8 @@ def build_discovery_options(
     *,
     model: str = DEFAULT_MODEL,
     max_budget_usd: float | None = None,
+    web_search: SearchClient | None = None,
+    web_search_guard: WebSearchGuard | None = None,
 ) -> ClaudeAgentOptions:
     """Assemble the SDK options for one discovery session.
 
@@ -256,21 +288,38 @@ def build_discovery_options(
         model: Model ID for the conversation.
         max_budget_usd: Optional hard spend cap for the whole session; the SDK stops the run
             when it is exceeded.
+        web_search: Optional scoped search client. When given, the ``web_search`` tool, its
+            prompt section, and the capping ``PreToolUse`` hook are all wired in together.
+        web_search_guard: The guard to use (owned by the caller so it can read the attempts);
+            a default one is created if ``web_search`` is given without it.
     """
-    record = build_record_tool(state, current_turn)
-    examples = build_examples_tool(matched_skills)
-    server = create_sdk_mcp_server(name=CANVAS_SERVER_NAME, tools=[record, examples])
+    tools = [build_record_tool(state, current_turn), build_examples_tool(matched_skills)]
+    allowed = [RECORD_TOOL_FULL_NAME, EXAMPLES_TOOL_FULL_NAME]
+    hooks: dict[HookEvent, list[HookMatcher]] = {}
+    web_search_max: int | None = None
+
+    if web_search is not None:
+        guard = web_search_guard or WebSearchGuard()
+        tools.append(build_web_search_tool(web_search))
+        allowed.append(WEB_SEARCH_TOOL_FULL_NAME)
+        # The hook runs before every web_search call and denies past the cap. Registered by
+        # the tool's full name so it never fires for the canvas tools.
+        hooks["PreToolUse"] = [guard.matcher(WEB_SEARCH_TOOL_FULL_NAME)]
+        web_search_max = guard.max_calls
+
+    server = create_sdk_mcp_server(name=CANVAS_SERVER_NAME, tools=tools)
 
     return ClaudeAgentOptions(
         model=model,
-        system_prompt=build_system_prompt(),
+        system_prompt=build_system_prompt(web_search_max=web_search_max),
         # Isolation: never inherit CLAUDE.md or ~/.claude settings into a stakeholder session.
         setting_sources=[],
-        # No built-in tools at all (no Read/Bash/etc. schemas in context); only our MCP tool.
+        # No built-in tools at all (no Read/Bash/etc. schemas in context); only our MCP tools.
         tools=[],
         mcp_servers={CANVAS_SERVER_NAME: server},
         # Pre-approve our tools so they run without a permission prompt.
-        allowed_tools=[RECORD_TOOL_FULL_NAME, EXAMPLES_TOOL_FULL_NAME],
+        allowed_tools=allowed,
+        hooks=hooks or None,
         max_turns=MAX_AGENTIC_TURNS_PER_QUERY,
         max_budget_usd=max_budget_usd,
         # Emit StreamEvents mid-turn so the orchestrator can stream text to the UI.

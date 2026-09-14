@@ -5,6 +5,7 @@ description = "Agentic discovery-to-prototype system built on the Claude Agent S
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.2.152",
+    "httpx>=0.28.1",
     "jsonschema>=4.26.0",
     "python-dotenv>=1.0",
     "pyyaml>=6.0.3",
