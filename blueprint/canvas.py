@@ -80,6 +80,79 @@ MULTI_SELECT_CATEGORIES: frozenset[CanvasCategory] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class RubricElement:
+    """One thing a category's recorded summary must state before it counts as sufficient."""
+
+    key: str
+    """Stable identifier; the completeness checker's schema uses these as an enum."""
+    description: str
+    """What "satisfied" means, phrased so a model can judge prose against it."""
+
+
+# What a reviewer needs to see in each category's summary. This is the deterministic half of
+# the completeness check: the checker may only report gaps from this list, and the discovery
+# agent may only be nudged to ask about these. An element is also satisfied when the summary
+# states explicitly that it does not apply (e.g. "no external systems").
+CATEGORY_RUBRIC: dict[CanvasCategory, tuple[RubricElement, ...]] = {
+    CanvasCategory.KEY_STAKEHOLDERS: (
+        RubricElement("performers", "Who does the work today, by role or team (not just 'us')."),
+        RubricElement(
+            "dependents",
+            "Who depends on or consumes the result (downstream teams, managers, customers), "
+            "or an explicit statement that nobody else depends on it.",
+        ),
+    ),
+    CanvasCategory.KEY_ACTIVITIES: (
+        RubricElement("process_steps", "The existing process as concrete steps or actions."),
+        RubricElement("headcount", "How many people perform it (a number or a clear size)."),
+        RubricElement(
+            "frequency", "How often it happens (daily, weekly, monthly, per event, a volume)."
+        ),
+    ),
+    CanvasCategory.VALUE_PROPOSITION: (
+        RubricElement(
+            "core_problem", "The problem being solved (time, errors, risk, consistency, cost)."
+        ),
+        RubricElement(
+            "measurable_impact",
+            "Something that could be measured: a current number, a target, or a named metric.",
+        ),
+    ),
+    CanvasCategory.SYSTEM_INTEGRATIONS: (
+        RubricElement(
+            "systems_named",
+            "The systems the process touches, by name or clear type (e.g. 'our HRIS', "
+            "'Salesforce'), or an explicit statement that none are involved.",
+        ),
+    ),
+    CanvasCategory.INPUT_SOURCE: (
+        RubricElement(
+            "sources_named",
+            "Where the knowledge or reference material lives (a named store, document, or "
+            "system), or an explicit statement that no external source is needed.",
+        ),
+    ),
+    CanvasCategory.INPUT_TYPES: (
+        RubricElement(
+            "types_selected",
+            "Which input types apply: typed prompts, document uploads, images, structured data.",
+        ),
+        RubricElement(
+            "samples_discussed",
+            "Whether real sample inputs exist and can be provided (asked and answered).",
+        ),
+    ),
+    CanvasCategory.OUTPUT_FORMAT: (
+        RubricElement(
+            "formats_selected",
+            "Which output formats apply: summarization, comparison, workflow automation, "
+            "drafting into a template, pulling data from a source, question-and-answer.",
+        ),
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
 class CanvasEntry:
     """One immutable capture event: the model judged a category sufficiently answered.
 

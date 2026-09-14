@@ -78,6 +78,20 @@ class TestSopGrounding:
         assert load_settings({**API, "BLUEPRINT_SOP_GROUNDING": "0"}).sop_grounding is False
 
 
+class TestCompleteness:
+    def test_defaults_and_overrides(self) -> None:
+        s = load_settings(API)
+        assert s.completeness_check is True and s.checker_model == "claude-opus-5"
+        s = load_settings(
+            {
+                **API,
+                "BLUEPRINT_COMPLETENESS_CHECK": "0",
+                "BLUEPRINT_CHECKER_MODEL": "claude-sonnet-5",
+            }
+        )
+        assert s.completeness_check is False and s.checker_model == "claude-sonnet-5"
+
+
 class TestNoSecretLeak:
     def test_to_dict_never_contains_secret_values(self) -> None:
         s = load_settings({**API, "TAVILY_API_KEY": "tvly-secret"})

@@ -24,6 +24,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from blueprint.canvas import CanvasCategory
 from blueprint.observability import configure_logging
 from blueprint.orchestrator import (
     DepartmentsMatched,
@@ -41,7 +42,9 @@ LOG_FILE = Path("logs") / "discovery.jsonl"
 
 
 def _trace_line(result: TurnResult, session: DiscoverySession) -> str:
-    captured = ", ".join(c.value for c in result.captured) or "-"
+    captured = ", ".join(
+        f"{a.category.value}{'' if a.sufficient else '?'}" for a in result.assessments
+    ) or (", ".join(c.value for c in result.captured) or "-")
     cost = f"${result.cost_usd:.4f}" if result.cost_usd is not None else "$?"
     remaining = len(session.state.missing())
     flag = "  !! error" if result.is_error else ""
@@ -70,6 +73,10 @@ async def _stream_turn(session: DiscoverySession, text: str) -> TurnResult:
                 print()
                 return result
     raise AssertionError("stream ended without TurnCompleted")  # orchestrator guarantees one
+
+
+def _fmt_gaps(gaps: dict[CanvasCategory, tuple[str, ...]]) -> str:
+    return "; ".join(f"{c.value}: {', '.join(g)}" for c, g in gaps.items()) or "-"
 
 
 def _script_lines(path: Path) -> Iterator[str]:
@@ -108,6 +115,8 @@ async def run(settings: Settings, *, script: Path | None) -> int:
         idle_timeout_s=settings.idle_timeout_s,
         web_search=search,
         sop_grounding=settings.sop_grounding,
+        completeness_check=settings.completeness_check,
+        checker_model=settings.checker_model,
     )
 
     try:
@@ -138,7 +147,7 @@ async def run(settings: Settings, *, script: Path | None) -> int:
         print(f"\n  session {session.session_id} · {session.turn} turns · {total}")
         print(f"  snapshot: {out}")
 
-    return 0 if session.is_complete else 1
+    return 0 if session.is_ready_for_review else 1
 
 
 def main() -> None:

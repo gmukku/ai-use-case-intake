@@ -17,11 +17,13 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from blueprint.canvas import CanvasCategory
+from blueprint.canvas import CATEGORY_RUBRIC, CanvasCategory
+from blueprint.completeness import Assessment, AssessmentError
 from blueprint.discovery import EXAMPLES_TOOL_FULL_NAME, RECORD_TOOL_FULL_NAME
 from blueprint.matching import DepartmentMatch, MatchError
 from blueprint.orchestrator import (
     MATCH_FALLBACK_TURN,
+    MAX_CLARIFICATION_ROUNDS,
     MAX_MATCH_ATTEMPTS,
     MAX_USER_TEXT_CHARS,
     DepartmentsMatched,
@@ -184,8 +186,41 @@ class FakeMatcher:
         )
 
 
+class FakeAssessor:
+    """Stand-in for assess_capture. Verdicts are scripted per category: a list of `missing`
+    tuples consumed in order (empty tuple = sufficient); unlisted categories are sufficient."""
+
+    def __init__(self, script: dict[str, list[tuple[str, ...]]] | None = None) -> None:
+        self.script = {k: list(v) for k, v in (script or {}).items()}
+        self.calls: list[tuple[str, int]] = []
+
+    async def __call__(
+        self, category: CanvasCategory, summary: str, *, version: int, model: str
+    ) -> Assessment:
+        self.calls.append((category.value, version))
+        queue = self.script.get(category.value)
+        missing = queue.pop(0) if queue else ()
+        keys = [e.key for e in CATEGORY_RUBRIC[category]]
+        return Assessment(
+            category=category,
+            version=version,
+            satisfied=tuple(k for k in keys if k not in missing),
+            missing=tuple(k for k in keys if k in missing),
+            question=f"Could you say more about {', '.join(missing)}?" if missing else None,
+            model=model,
+            cost_usd=0.008,
+            duration_ms=40,
+            assessed_at=datetime.now(UTC),
+        )
+
+
 def make_session(
-    script: list[list[Step]], matcher: FakeMatcher | None = None
+    script: list[list[Step]],
+    matcher: FakeMatcher | None = None,
+    assessor: FakeAssessor | None = None,
+    *,
+    completeness_check: bool = True,
+    max_clarification_rounds: int = MAX_CLARIFICATION_ROUNDS,
 ) -> tuple[DiscoverySession, list[FakeClient]]:
     created: list[FakeClient] = []
 
@@ -195,7 +230,12 @@ def make_session(
         return client
 
     session = DiscoverySession(
-        client_factory=factory, skills=SKILLS, match_fn=matcher or FakeMatcher()
+        client_factory=factory,
+        skills=SKILLS,
+        match_fn=matcher or FakeMatcher(),
+        assess_fn=assessor or FakeAssessor(),
+        completeness_check=completeness_check,
+        max_clarification_rounds=max_clarification_rounds,
     )
     return session, created
 
@@ -529,6 +569,134 @@ class TestFailureContainment:
 
         created[0].disconnect = boom  # type: ignore[method-assign]
         await session.close()  # must not raise
+
+
+def ready(session: DiscoverySession) -> bool:
+    # A function call so mypy does not narrow the property across statements.
+    return session.is_ready_for_review
+
+
+class TestCompletenessLoop:
+    async def test_sufficient_capture_says_so(self) -> None:
+        script: list[list[Step]] = [
+            [{"category": "key_stakeholders", "summary": "HR ops, hiring managers wait"}, "ok"]
+        ]
+        session, created = make_session(script)
+        async with session:
+            result = await session.send("x")
+        assert "Sufficient." in created[0].tool_results[0]
+        assert len(result.assessments) == 1 and result.assessments[0].sufficient
+        assert session.completeness.rounds == {}
+
+    async def test_gap_becomes_a_follow_up_in_the_tool_result(self) -> None:
+        assessor = FakeAssessor({"key_activities": [("headcount", "frequency"), ()]})
+        script: list[list[Step]] = [
+            [{"category": "key_activities", "summary": "they check packets"}, "How often?"],
+            [{"category": "key_activities", "summary": "3 people, daily"}, "Thanks."],
+        ]
+        session, created = make_session(script, assessor=assessor)
+        async with session:
+            first = await session.send("we check packets")
+            second = await session.send("three of us, every day")
+
+        text = created[0].tool_results[0]
+        assert "Incomplete: missing headcount, frequency" in text
+        assert "ask something like" in text and "Could you say more about" in text
+        assert first.assessments[0].missing == ("headcount", "frequency")
+        assert "Sufficient." in created[0].tool_results[1]
+        assert second.assessments[0].sufficient
+        assert session.completeness.rounds == {CanvasCategory.KEY_ACTIVITIES: 1}
+        assert assessor.calls == [("key_activities", 1), ("key_activities", 2)]
+
+    async def test_clarification_rounds_are_capped(self) -> None:
+        always_missing: list[tuple[str, ...]] = [("frequency",)] * 5
+        assessor = FakeAssessor({"key_activities": always_missing})
+        steps: list[list[Step]] = [
+            [{"category": "key_activities", "summary": f"v{i}"}, "?"] for i in range(1, 5)
+        ]
+        session, created = make_session(script=steps, assessor=assessor, max_clarification_rounds=2)
+        async with session:
+            for i in range(4):
+                await session.send(str(i))
+        results = created[0].tool_results
+        assert "Before moving on, ask" in results[0]
+        assert "Before moving on, ask" in results[1]
+        assert "do not ask again" in results[2]  # cap reached: gaps go to the reviewer
+        assert "do not ask again" in results[3]
+        assert session.completeness.rounds == {CanvasCategory.KEY_ACTIVITIES: 2}
+
+    async def test_ready_for_review_requires_sufficiency_not_just_completeness(self) -> None:
+        assessor = FakeAssessor({"value_proposition": [("measurable_impact",), ()]})
+        all_seven: list[Step] = [
+            {"category": c.value, "summary": f"{c.value} ok"} for c in CanvasCategory
+        ]
+        script: list[list[Step]] = [
+            [*all_seven, "recap"],
+            [{"category": "value_proposition", "summary": "saves 10 hours a week"}, "thanks"],
+        ]
+        session, _ = make_session(script, assessor=assessor)
+        async with session:
+            await session.send("everything at once")
+            assert session.is_complete
+            assert not ready(session)
+            assert session.completeness.gaps(session.state) == {
+                CanvasCategory.VALUE_PROPOSITION: ("measurable_impact",)
+            }
+            await session.send("about ten hours a week")
+            assert ready(session)
+        snap = session.to_dict()
+        assert snap["is_ready_for_review"] is True
+        assert snap["open_gaps"] == {}
+        assert len(snap["completeness"]["assessments"]) == 8
+
+    async def test_capped_gaps_still_count_as_ready(self) -> None:
+        assessor = FakeAssessor({"output_format": [("formats_selected",)] * 4})
+        all_seven: list[Step] = [
+            {"category": c.value, "summary": f"{c.value} ok"} for c in CanvasCategory
+        ]
+        script: list[list[Step]] = [
+            [*all_seven, "recap"],
+            [{"category": "output_format", "summary": "still vague"}, "ok"],
+            [{"category": "output_format", "summary": "still vague"}, "ok"],
+        ]
+        session, _ = make_session(script, assessor=assessor, max_clarification_rounds=2)
+        async with session:
+            await session.send("1")
+            assert not ready(session)
+            await session.send("2")
+            await session.send("3")
+            # two follow-ups asked; a third gap is accepted and carried to the reviewer
+            assert ready(session)
+        assert session.to_dict()["open_gaps"] == {"output_format": ["formats_selected"]}
+
+    async def test_checker_failure_never_blocks_a_capture(self) -> None:
+        class Exploding(FakeAssessor):
+            async def __call__(self, *a: Any, **k: Any) -> Assessment:
+                raise AssessmentError("checker down")
+
+        script: list[list[Step]] = [[{"category": "input_source", "summary": "SharePoint"}, "ok"]]
+        session, created = make_session(script, assessor=Exploding())
+        async with session:
+            result = await session.send("x")
+        assert session.state.current(CanvasCategory.INPUT_SOURCE) is not None
+        assert result.assessments == ()
+        assert "Recorded input_source (v1)." in created[0].tool_results[0]
+        assert "Sufficient" not in created[0].tool_results[0]
+
+    async def test_disabled_check_means_ready_equals_complete(self) -> None:
+        all_seven: list[Step] = [
+            {"category": c.value, "summary": f"{c.value} ok"} for c in CanvasCategory
+        ]
+        assessor = FakeAssessor()
+        session, created = make_session(
+            [[*all_seven, "recap"]], assessor=assessor, completeness_check=False
+        )
+        async with session:
+            await session.send("all")
+        assert assessor.calls == []
+        assert session.is_ready_for_review
+        assert session.to_dict()["completeness"] is None
+        assert "Sufficient" not in created[0].tool_results[0]
 
 
 class TestSnapshot:

@@ -1,0 +1,13 @@
+# Stakeholder who answers thinly at first. Exercises the completeness checker and clarification loop.
+Hi, our onboarding paperwork is a mess and I want help with it.
+Just the HR team really.
+We check the packets.
+It takes too long.
+We use an HRIS and email.
+Our checklist is in SharePoint.
+PDFs mostly.
+A checklist of what's missing, and maybe answering questions.
+It's me and two coordinators, and hiring managers and payroll depend on us.
+Each coordinator opens the packet, checks I-9, W-4 and direct deposit, emails the hire for missing items. About 30 a month, so daily.
+Each packet is 20 to 30 minutes and we still miss fields, which causes payroll errors. Cutting that in half would be the goal.
+Yes, we can share a couple of real packets with the personal details blacked out.

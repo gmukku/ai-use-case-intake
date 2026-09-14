@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Final
 
@@ -31,8 +31,10 @@ from blueprint.canvas import (
     CATEGORY_QUESTIONS,
     MULTI_SELECT_CATEGORIES,
     CanvasCategory,
+    CanvasEntry,
     CanvasState,
 )
+from blueprint.completeness import Assessment
 from blueprint.skills import DepartmentSkill
 from blueprint.sop_server import LIST_TOOL as SOP_LIST_TOOL
 from blueprint.sop_server import READ_TOOL as SOP_READ_TOOL
@@ -65,6 +67,10 @@ _REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 # Callable the orchestrator supplies: which department skills currently apply (may be empty
 # before the classifier has run).
 MatchedSkills = Callable[[], list[DepartmentSkill]]
+
+# Callable the orchestrator supplies for the completeness check: (entry, version) ->
+# (assessment or None, should the model ask the follow-up now).
+AssessFn = Callable[[CanvasEntry, int], Awaitable[tuple[Assessment | None, bool]]]
 
 DEFAULT_MODEL: Final = "claude-opus-5"
 
@@ -225,19 +231,28 @@ what you understood (a short paragraph, not a list of categories), and tell them
 will look it over before anything is built."""
 
 
-def build_record_tool(state: CanvasState, current_turn: Callable[[], int]) -> SdkMcpTool[Any]:
+def build_record_tool(
+    state: CanvasState,
+    current_turn: Callable[[], int],
+    assess: AssessFn | None = None,
+) -> SdkMcpTool[Any]:
     """Create the ``record_canvas_answer`` tool bound to one conversation's state.
 
     Args:
         state: The append-only canvas log the orchestrator owns.
         current_turn: Zero-arg callable returning the current stakeholder turn number. Injected
             (not passed by the model) so the model cannot misattribute a capture to another turn.
+        assess: Optional completeness check, called with the recorded entry and its version.
+            Returns ``(assessment, should_ask)``: the verdict, and whether the model should ask
+            the follow-up now (the orchestrator caps clarification rounds). ``None`` for the
+            assessment means the check was disabled or failed; recording proceeds regardless.
     """
 
     @tool(
         RECORD_TOOL_NAME,
         "Record that a canvas category has been sufficiently answered by the stakeholder. "
-        "Call once per category as soon as it is covered; call again to update.",
+        "Call once per category as soon as it is covered; call again to update. The result "
+        "tells you if the summary has gaps you should ask about before moving on.",
         RECORD_TOOL_SCHEMA,
     )
     async def record_canvas_answer(args: dict[str, Any]) -> dict[str, Any]:
@@ -250,21 +265,37 @@ def build_record_tool(state: CanvasState, current_turn: Callable[[], int]) -> Sd
             return {"content": [{"type": "text", "text": f"Rejected: {exc}"}], "is_error": True}
 
         version = len(state.history(entry.category))
+        logger.info(
+            "discovery.record.ok",
+            extra={"category": entry.category.value, "turn": turn, "version": version},
+        )
+
+        verdict = ""
+        if assess is not None:
+            assessment, should_ask = await assess(entry, version)
+            if assessment is not None and not assessment.sufficient:
+                gaps = ", ".join(assessment.missing)
+                if should_ask:
+                    verdict = (
+                        f" Incomplete: missing {gaps}. Before moving on, ask something like: "
+                        f'"{assessment.question}"'
+                    )
+                else:
+                    verdict = (
+                        f" Gaps remain ({gaps}) but do not ask again; they are noted for the "
+                        "reviewer. Move on."
+                    )
+            elif assessment is not None:
+                verdict = " Sufficient."
+
         missing = state.missing()
         status = (
             "All seven categories are now recorded."
             if not missing
             else "Still uncovered: " + ", ".join(c.value for c in missing)
         )
-        logger.info(
-            "discovery.record.ok",
-            extra={"category": entry.category.value, "turn": turn, "version": version},
-        )
-        return {
-            "content": [
-                {"type": "text", "text": f"Recorded {entry.category.value} (v{version}). {status}"}
-            ]
-        }
+        text = f"Recorded {entry.category.value} (v{version}).{verdict} {status}"
+        return {"content": [{"type": "text", "text": text}]}
 
     return record_canvas_answer
 
@@ -332,6 +363,7 @@ def build_discovery_options(
     web_search_guard: WebSearchGuard | None = None,
     sop_grounding: bool = True,
     sop_dir: Path = SOP_DIR,
+    assess: AssessFn | None = None,
 ) -> ClaudeAgentOptions:
     """Assemble the SDK options for one discovery session.
 
@@ -349,8 +381,13 @@ def build_discovery_options(
         sop_grounding: Attach the SOP library as an external stdio MCP server (see
             :func:`sop_server_config`). On by default; it is local and deterministic.
         sop_dir: Directory the SOP server should load; overridable for tests.
+        assess: Optional completeness check wired into the record tool (see
+            :func:`build_record_tool`).
     """
-    tools = [build_record_tool(state, current_turn), build_examples_tool(matched_skills)]
+    tools = [
+        build_record_tool(state, current_turn, assess),
+        build_examples_tool(matched_skills),
+    ]
     allowed = [RECORD_TOOL_FULL_NAME, EXAMPLES_TOOL_FULL_NAME]
     hooks: dict[HookEvent, list[HookMatcher]] = {}
     web_search_max: int | None = None

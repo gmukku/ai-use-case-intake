@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from blueprint.completeness import DEFAULT_CHECKER_MODEL
 from blueprint.discovery import DEFAULT_MODEL
 from blueprint.orchestrator import DEFAULT_IDLE_TIMEOUT_S
 
@@ -39,6 +40,8 @@ class Settings:
     web_search_enabled: bool
     tavily_api_key: str | None
     sop_grounding: bool
+    completeness_check: bool
+    checker_model: str
 
     def to_dict(self) -> dict[str, Any]:
         """Loggable view: presence of secrets, never their values."""
@@ -51,6 +54,8 @@ class Settings:
             "web_search_enabled": self.web_search_enabled,
             "tavily_api_key_set": self.tavily_api_key is not None,
             "sop_grounding": self.sop_grounding,
+            "completeness_check": self.completeness_check,
+            "checker_model": self.checker_model,
         }
 
 
@@ -125,4 +130,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         web_search_enabled=web_search_enabled,
         tavily_api_key=tavily_api_key,
         sop_grounding=_flag(env, "BLUEPRINT_SOP_GROUNDING", default=True),
+        completeness_check=_flag(env, "BLUEPRINT_COMPLETENESS_CHECK", default=True),
+        checker_model=env.get("BLUEPRINT_CHECKER_MODEL", "").strip() or DEFAULT_CHECKER_MODEL,
     )

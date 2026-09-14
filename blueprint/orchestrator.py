@@ -34,7 +34,13 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from blueprint.canvas import CanvasCategory, CanvasState
+from blueprint.canvas import CanvasCategory, CanvasEntry, CanvasState
+from blueprint.completeness import (
+    DEFAULT_CHECKER_MODEL,
+    Assessment,
+    AssessmentError,
+    assess_capture,
+)
 from blueprint.discovery import DEFAULT_MODEL, build_discovery_options
 from blueprint.matching import DepartmentMatch, MatchError, match_departments
 from blueprint.skills import SKILLS_DIR, DepartmentSkill, load_skills
@@ -78,6 +84,8 @@ class TurnResult:
     tool_calls: tuple[ToolCall, ...]
     captured: tuple[CanvasCategory, ...]
     """Categories recorded during this turn, in the order they were recorded."""
+    assessments: tuple[Assessment, ...]
+    """Completeness verdicts produced during this turn (one per capture when enabled)."""
     session_id: str
     cost_usd: float | None
     """Cost of this turn alone (delta of the session's running total)."""
@@ -98,6 +106,7 @@ class TurnResult:
             "assistant_text": self.assistant_text,
             "tool_calls": [t.to_dict() for t in self.tool_calls],
             "captured": [c.value for c in self.captured],
+            "assessments": [a.to_dict() for a in self.assessments],
             "session_id": self.session_id,
             "cost_usd": self.cost_usd,
             "session_cost_usd": self.session_cost_usd,
@@ -158,6 +167,57 @@ MATCH_FALLBACK_TURN = 3
 # Give up on classification after this many failed attempts; discovery continues without it.
 MAX_MATCH_ATTEMPTS = 2
 
+# Anything with the signature of assess_capture; injectable for tests.
+AssessFn = Callable[..., Awaitable[Assessment]]
+
+# After this many clarifying follow-ups on one category, accept it as-is and leave the
+# remaining gaps for the reviewer. This is the "do not interrogate" rule enforced in code.
+MAX_CLARIFICATION_ROUNDS: Final = 2
+
+
+@dataclass(slots=True)
+class CompletenessTracker:
+    """Append-only log of completeness verdicts plus the per-category clarification budget."""
+
+    assessments: list[Assessment] = field(default_factory=list)
+    rounds: dict[CanvasCategory, int] = field(default_factory=dict)
+    """How many clarifying follow-ups have been requested per category."""
+
+    def latest(self, category: CanvasCategory) -> Assessment | None:
+        """The most recent verdict for ``category``, if any."""
+        for a in reversed(self.assessments):
+            if a.category is category:
+                return a
+        return None
+
+    def record(self, assessment: Assessment, *, max_rounds: int) -> bool:
+        """Append a verdict; return whether the model should ask the follow-up now."""
+        self.assessments.append(assessment)
+        if assessment.sufficient:
+            return False
+        used = self.rounds.get(assessment.category, 0)
+        if used >= max_rounds:
+            return False
+        self.rounds[assessment.category] = used + 1
+        return True
+
+    def gaps(self, state: CanvasState) -> dict[CanvasCategory, tuple[str, ...]]:
+        """Categories whose latest capture still has missing rubric elements."""
+        out: dict[CanvasCategory, tuple[str, ...]] = {}
+        for category in state.covered():
+            latest = self.latest(category)
+            if latest is not None and not latest.sufficient:
+                out[category] = latest.missing
+        return out
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable view."""
+        return {
+            "assessments": [a.to_dict() for a in self.assessments],
+            "rounds": {c.value: n for c, n in self.rounds.items()},
+        }
+
+
 # Stakeholder message bounds: blank messages are rejected, long ones capped before they are
 # sent (and billed). 8k chars is far beyond anything typed in a chat and well under context.
 MAX_USER_TEXT_CHARS: Final = 8_000
@@ -204,6 +264,10 @@ class DiscoverySession:
         web_search: SearchClient | None = None,
         max_web_searches: int = DEFAULT_MAX_SEARCHES_PER_SESSION,
         sop_grounding: bool = True,
+        completeness_check: bool = True,
+        checker_model: str = DEFAULT_CHECKER_MODEL,
+        assess_fn: AssessFn = assess_capture,
+        max_clarification_rounds: int = MAX_CLARIFICATION_ROUNDS,
     ) -> None:
         self.state = CanvasState()
         self.turn = 0
@@ -218,6 +282,11 @@ class DiscoverySession:
         self._classifier_model = classifier_model
         self._match_fn = match_fn
         self._match_attempts = 0
+        self.completeness = CompletenessTracker()
+        self._completeness_check = completeness_check
+        self._checker_model = checker_model
+        self._assess_fn = assess_fn
+        self._max_clarification_rounds = max_clarification_rounds
         # The guard is owned here (not inside discovery.py) so its attempts are in the snapshot.
         self.web_search_guard = (
             WebSearchGuard(max_calls=max_web_searches) if web_search is not None else None
@@ -233,9 +302,38 @@ class DiscoverySession:
             web_search=web_search,
             web_search_guard=self.web_search_guard,
             sop_grounding=sop_grounding,
+            assess=self._assess if completeness_check else None,
         )
         self._client_factory = client_factory
         self._client: ClaudeSDKClient | None = None
+
+    async def _assess(self, entry: CanvasEntry, version: int) -> tuple[Assessment | None, bool]:
+        """Run the completeness check for one capture; called from inside the record tool.
+
+        Failures are logged and swallowed: a capture must never fail because the checker did.
+        """
+        try:
+            assessment = await self._assess_fn(
+                entry.category, entry.summary, version=version, model=self._checker_model
+            )
+        except (AssessmentError, ValueError) as exc:
+            logger.error(
+                "completeness.failed",
+                extra={"category": entry.category.value, "version": version, "error": str(exc)},
+            )
+            return None, False
+        should_ask = self.completeness.record(assessment, max_rounds=self._max_clarification_rounds)
+        logger.info(
+            "completeness.recorded",
+            extra={
+                "category": entry.category.value,
+                "version": version,
+                "sufficient": assessment.sufficient,
+                "ask": should_ask,
+                "rounds": self.completeness.rounds.get(entry.category, 0),
+            },
+        )
+        return assessment, should_ask
 
     def matched_skills(self) -> list[DepartmentSkill]:
         """Department skills the classifier selected, in relevance order; empty until it runs."""
@@ -313,6 +411,7 @@ class DiscoverySession:
         turn = self.turn
         started_at = datetime.now(UTC)
         entries_before = len(self.state.entries)
+        assessments_before = len(self.completeness.assessments)
         logger.info("turn.start", extra={"turn": turn, "chars": len(user_text)})
 
         text_parts: list[str] = []
@@ -390,12 +489,14 @@ class DiscoverySession:
             session_cost = self.total_cost_usd
 
         captured = tuple(e.category for e in self.state.entries[entries_before:])
+        assessments = tuple(self.completeness.assessments[assessments_before:])
         turn_result = TurnResult(
             turn=turn,
             user_text=user_text,
             assistant_text="\n".join(p for p in text_parts if p.strip()).strip(),
             tool_calls=tuple(tool_calls),
             captured=captured,
+            assessments=assessments,
             session_id=self.session_id or "",
             cost_usd=turn_cost,
             session_cost_usd=session_cost,
@@ -493,6 +594,22 @@ class DiscoverySession:
         """True once every canvas category has been recorded at least once."""
         return self.state.is_complete
 
+    @property
+    def is_ready_for_review(self) -> bool:
+        """The handoff decision: complete, and no category's latest capture has open gaps.
+
+        With the check disabled this equals ``is_complete``. A category that has used its
+        clarification rounds still counts as ready; its gaps are carried to the reviewer.
+        """
+        if not self.state.is_complete:
+            return False
+        if not self._completeness_check:
+            return True
+        return all(
+            self.completeness.rounds.get(category, 0) >= self._max_clarification_rounds
+            for category in self.completeness.gaps(self.state)
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Full serializable snapshot: canvas + every turn. This is the spec plus its trace."""
         return {
@@ -504,6 +621,9 @@ class DiscoverySession:
             "failure": self.failure,
             "match": self.match.to_dict() if self.match else None,
             "web_search": self.web_search_guard.to_dict() if self.web_search_guard else None,
+            "is_ready_for_review": self.is_ready_for_review,
+            "completeness": self.completeness.to_dict() if self._completeness_check else None,
+            "open_gaps": {c.value: list(g) for c, g in self.completeness.gaps(self.state).items()},
             "canvas": self.state.to_dict(),
             "turns": [t.to_dict() for t in self.turns],
         }
