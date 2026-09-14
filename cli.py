@@ -16,13 +16,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from blueprint.discovery import DEFAULT_MODEL
 from blueprint.observability import configure_logging
 from blueprint.orchestrator import (
     DepartmentsMatched,
@@ -32,6 +33,7 @@ from blueprint.orchestrator import (
     TurnCompleted,
     TurnResult,
 )
+from blueprint.settings import Settings, SettingsError, load_settings
 
 RUNS_DIR = Path("runs")
 LOG_FILE = Path("logs") / "discovery.jsonl"
@@ -87,20 +89,29 @@ def _prompt_lines() -> Iterator[str]:
             yield text
 
 
-async def run(*, model: str, budget: float, script: Path | None) -> int:
+async def run(settings: Settings, *, script: Path | None) -> int:
     """Drive one session; return a process exit code."""
     messages = _script_lines(script) if script else _prompt_lines()
-    session = DiscoverySession(model=model, max_budget_usd=budget)
+    session = DiscoverySession(
+        model=settings.model,
+        classifier_model=settings.classifier_model,
+        max_budget_usd=settings.max_budget_usd,
+        idle_timeout_s=settings.idle_timeout_s,
+    )
 
     try:
         async with session:
             for text in messages:
                 if script:
                     print(f"\nyou> {text}")
-                result = await _stream_turn(session, text)
+                try:
+                    result = await _stream_turn(session, text)
+                except ValueError as exc:  # blank or oversized message; nothing was sent
+                    print(f"  (not sent: {exc})", file=sys.stderr)
+                    continue
                 print(_trace_line(result, session))
                 if result.is_error:
-                    print(f"  errors: {'; '.join(result.errors)}", file=sys.stderr)
+                    print(f"  session ended: {'; '.join(result.errors)}", file=sys.stderr)
                     break
                 if session.is_complete:
                     print("\n  [canvas complete]")
@@ -120,16 +131,28 @@ async def run(*, model: str, budget: float, script: Path | None) -> int:
 def main() -> None:
     """Parse args, configure logging, run."""
     parser = argparse.ArgumentParser(description="Hand-test a discovery conversation.")
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--budget", type=float, default=3.0, help="hard USD cap for the session")
+    parser.add_argument("--model", help="override BLUEPRINT_MODEL for this run")
+    parser.add_argument("--budget", type=float, help="override BLUEPRINT_MAX_BUDGET_USD (USD)")
     parser.add_argument("--script", type=Path, help="replay a saved conversation instead of typing")
     args = parser.parse_args()
 
     # Windows consoles default to a legacy code page; force UTF-8 so trace glyphs print.
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
     load_dotenv()
+    # Flags win over the environment for this one run.
+    if args.model:
+        os.environ["BLUEPRINT_MODEL"] = args.model
+    if args.budget is not None:
+        os.environ["BLUEPRINT_MAX_BUDGET_USD"] = str(args.budget)
+    try:
+        settings = load_settings()
+    except SettingsError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
     configure_logging(LOG_FILE)
-    sys.exit(asyncio.run(run(model=args.model, budget=args.budget, script=args.script)))
+    logging.getLogger("blueprint.cli").info("cli.start", extra=settings.to_dict())
+    sys.exit(asyncio.run(run(settings, script=args.script)))
 
 
 if __name__ == "__main__":

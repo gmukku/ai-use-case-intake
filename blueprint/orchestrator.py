@@ -13,17 +13,21 @@ Later steps plug in here without changing the model-facing side:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Final, Self
 
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    ClaudeSDKError,
+    RateLimitEvent,
+    ResultError,
     ResultMessage,
     StreamEvent,
     TextBlock,
@@ -153,6 +157,26 @@ MATCH_FALLBACK_TURN = 3
 # Give up on classification after this many failed attempts; discovery continues without it.
 MAX_MATCH_ATTEMPTS = 2
 
+# Stakeholder message bounds: blank messages are rejected, long ones capped before they are
+# sent (and billed). 8k chars is far beyond anything typed in a chat and well under context.
+MAX_USER_TEXT_CHARS: Final = 8_000
+# Seconds without any message from the SDK before a turn is declared dead.
+DEFAULT_IDLE_TIMEOUT_S: Final = 90.0
+
+
+def validate_user_text(text: str) -> str:
+    """Normalize and bound a stakeholder message.
+
+    Raises:
+        ValueError: if the message is blank or exceeds ``MAX_USER_TEXT_CHARS``.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        raise ValueError("message is empty")
+    if len(cleaned) > MAX_USER_TEXT_CHARS:
+        raise ValueError(f"message is {len(cleaned)} chars; limit is {MAX_USER_TEXT_CHARS}")
+    return cleaned
+
 
 class DiscoverySession:
     """One stakeholder's discovery conversation, from first message to a complete canvas.
@@ -175,12 +199,16 @@ class DiscoverySession:
         skills: dict[str, DepartmentSkill] | None = None,
         client_factory: ClientFactory = ClaudeSDKClient,
         match_fn: MatchFn = match_departments,
+        idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
     ) -> None:
         self.state = CanvasState()
         self.turn = 0
         self.session_id: str | None = None
         self.total_cost_usd = 0.0
         self.turns: list[TurnResult] = []
+        self.idle_timeout_s = idle_timeout_s
+        self.failure: str | None = None
+        """Why the session died, if it did (budget, API error, timeout). ``None`` while healthy."""
         self.skills = skills if skills is not None else load_skills(SKILLS_DIR)
         self.match: DepartmentMatch | None = None
         self._classifier_model = classifier_model
@@ -219,10 +247,13 @@ class DiscoverySession:
         """Tear down the SDK session. Safe to call twice."""
         if self._client is None:
             return
+        client, self._client = self._client, None
         try:
-            await self._client.disconnect()
+            await client.disconnect()
+        except ClaudeSDKError:
+            # A subprocess that is already gone is not an error worth propagating on close.
+            logger.warning("session.close.disconnect_failed", exc_info=True)
         finally:
-            self._client = None
             logger.info(
                 "session.close",
                 extra={
@@ -230,6 +261,7 @@ class DiscoverySession:
                     "turns": self.turn,
                     "total_cost_usd": round(self.total_cost_usd, 6),
                     "is_complete": self.is_complete,
+                    "failure": self.failure,
                 },
             )
 
@@ -260,7 +292,10 @@ class DiscoverySession:
             TurnProtocolError: if the SDK stream ends without a ``ResultMessage``.
         """
         if self._client is None:
-            raise SessionNotStartedError("call start() (or use 'async with') before send()")
+            raise SessionNotStartedError(
+                f"session is not running ({self.failure or 'call start() first'})"
+            )
+        user_text = validate_user_text(user_text)
 
         # Increment BEFORE query() so tool calls made during this turn see the new number.
         self.turn += 1
@@ -269,37 +304,79 @@ class DiscoverySession:
         entries_before = len(self.state.entries)
         logger.info("turn.start", extra={"turn": turn, "chars": len(user_text)})
 
-        await self._client.query(user_text)
-
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         result: ResultMessage | None = None
+        failure: str | None = None
 
-        async for message in self._client.receive_response():
-            if isinstance(message, StreamEvent):
-                event = _translate_stream_event(message.event)
-                if event is not None:
-                    yield event
-            elif isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        text_parts.append(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        tool_calls.append(
-                            ToolCall(id=block.id, name=block.name, input=dict(block.input))
-                        )
-            elif isinstance(message, ResultMessage):
-                result = message
+        try:
+            await self._client.query(user_text)
+            messages = self._client.receive_response().__aiter__()
+            while True:
+                # Idle timeout: "the SDK stopped talking to us", not a cap on the whole turn,
+                # so a slow consumer between yields is not penalized.
+                try:
+                    message = await asyncio.wait_for(messages.__anext__(), self.idle_timeout_s)
+                except StopAsyncIteration:
+                    break
+                if isinstance(message, StreamEvent):
+                    event = _translate_stream_event(message.event)
+                    if event is not None:
+                        yield event
+                elif isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            text_parts.append(block.text)
+                        elif isinstance(block, ToolUseBlock):
+                            tool_calls.append(
+                                ToolCall(id=block.id, name=block.name, input=dict(block.input))
+                            )
+                elif isinstance(message, RateLimitEvent):
+                    info = message.rate_limit_info
+                    logger.warning(
+                        "turn.rate_limit",
+                        extra={
+                            "turn": turn,
+                            "status": info.status,
+                            "rate_limit_type": info.rate_limit_type,
+                            "utilization": info.utilization,
+                            "resets_at": info.resets_at,
+                        },
+                    )
+                elif isinstance(message, ResultMessage):
+                    result = message
+                    break
+        except TimeoutError:
+            failure = f"no response from the model for {self.idle_timeout_s:.0f}s"
+        except ResultError as exc:
+            # The CLI reported a terminal error result and exited: budget exceeded, max turns,
+            # API failure. The subprocess is gone; the session cannot continue.
+            failure = f"{exc.terminal_reason or exc.subtype or 'error'}: {exc.result or exc}"
+        except ClaudeSDKError as exc:
+            failure = f"sdk error: {exc}"
 
-        if result is None:
+        if failure is None and result is None:
             raise TurnProtocolError(f"turn {turn}: stream ended without a ResultMessage")
 
-        self.session_id = result.session_id
-        # The SDK reports a RUNNING TOTAL per ResultMessage, not a per-turn cost.
-        turn_cost: float | None = None
-        if result.total_cost_usd is not None:
-            turn_cost = result.total_cost_usd - self.total_cost_usd
-            self.total_cost_usd = result.total_cost_usd
+        if result is not None:
+            self.session_id = result.session_id
+            # The SDK reports a RUNNING TOTAL per ResultMessage, not a per-turn cost.
+            turn_cost: float | None = None
+            if result.total_cost_usd is not None:
+                turn_cost = result.total_cost_usd - self.total_cost_usd
+                self.total_cost_usd = result.total_cost_usd
+            is_error = result.is_error
+            errors: tuple[str, ...] = tuple(result.errors or ())
+            duration_ms = result.duration_ms
+            num_agentic_turns = result.num_turns
+            session_cost = result.total_cost_usd
+        else:
+            turn_cost = None
+            is_error = True
+            errors = (failure or "unknown failure",)
+            duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
+            num_agentic_turns = 0
+            session_cost = self.total_cost_usd
 
         captured = tuple(e.category for e in self.state.entries[entries_before:])
         turn_result = TurnResult(
@@ -308,37 +385,53 @@ class DiscoverySession:
             assistant_text="\n".join(p for p in text_parts if p.strip()).strip(),
             tool_calls=tuple(tool_calls),
             captured=captured,
-            session_id=result.session_id,
+            session_id=self.session_id or "",
             cost_usd=turn_cost,
-            session_cost_usd=result.total_cost_usd,
-            num_agentic_turns=result.num_turns,
-            duration_ms=result.duration_ms,
-            is_error=result.is_error,
-            errors=tuple(result.errors or ()),
+            session_cost_usd=session_cost,
+            num_agentic_turns=num_agentic_turns,
+            duration_ms=duration_ms,
+            is_error=is_error,
+            errors=errors,
             started_at=started_at,
         )
         self.turns.append(turn_result)
 
         logger.log(
-            logging.ERROR if result.is_error else logging.INFO,
+            logging.ERROR if is_error else logging.INFO,
             "turn.end",
             extra={
                 "turn": turn,
-                "session_id": result.session_id,
+                "session_id": self.session_id,
                 "captured": [c.value for c in captured],
                 "tool_calls": len(tool_calls),
                 "cost_usd": turn_cost,
-                "session_cost_usd": result.total_cost_usd,
-                "is_error": result.is_error,
+                "session_cost_usd": session_cost,
+                "is_error": is_error,
+                "errors": list(errors),
                 "missing": [c.value for c in self.state.missing()],
             },
         )
-        if self._should_match(captured):
+
+        if failure is not None:
+            # The subprocess exited or hung; drop it so the next send() fails fast and clearly.
+            await self._abandon(failure)
+        elif self._should_match(captured):
             match = await self._run_matching()
             if match is not None:
                 yield DepartmentsMatched(match)
 
         yield TurnCompleted(turn_result)
+
+    async def _abandon(self, reason: str) -> None:
+        """Mark the session dead after an unrecoverable SDK failure; best-effort cleanup."""
+        self.failure = reason
+        client, self._client = self._client, None
+        logger.error("session.abandoned", extra={"turn": self.turn, "reason": reason})
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:  # cleanup of a dead subprocess; nothing to recover
+                logger.debug("session.abandon.disconnect_failed", exc_info=True)
 
     # -- department matching -------------------------------------------------------------
 
@@ -397,6 +490,7 @@ class DiscoverySession:
             "turn": self.turn,
             "total_cost_usd": self.total_cost_usd,
             "is_complete": self.is_complete,
+            "failure": self.failure,
             "match": self.match.to_dict() if self.match else None,
             "canvas": self.state.to_dict(),
             "turns": [t.to_dict() for t in self.turns],

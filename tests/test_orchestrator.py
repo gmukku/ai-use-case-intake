@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -6,6 +7,10 @@ import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ProcessError,
+    RateLimitEvent,
+    RateLimitInfo,
+    ResultError,
     ResultMessage,
     StreamEvent,
     TextBlock,
@@ -18,6 +23,7 @@ from blueprint.matching import DepartmentMatch, MatchError
 from blueprint.orchestrator import (
     MATCH_FALLBACK_TURN,
     MAX_MATCH_ATTEMPTS,
+    MAX_USER_TEXT_CHARS,
     DepartmentsMatched,
     DiscoverySession,
     SessionNotStartedError,
@@ -25,6 +31,7 @@ from blueprint.orchestrator import (
     ToolCallStarted,
     TurnCompleted,
     TurnProtocolError,
+    validate_user_text,
 )
 from blueprint.skills import SKILLS_DIR, load_skills
 
@@ -74,6 +81,10 @@ class FakeClient:
         self.running_total = 0.0
         self.stream_chunk = 4  # chars per text_delta; mirrors the SDK's partial messages
         self.tool_results: list[str] = []
+        # Failure knobs, consumed on the next receive_response():
+        self.raise_result_error: ResultError | None = None  # after the text, before the result
+        self.hang = False  # never deliver anything (idle-timeout path)
+        self.emit_rate_limit = False
 
     async def connect(self, prompt: Any = None) -> None:
         self.connected = True
@@ -85,6 +96,14 @@ class FakeClient:
         self.queries.append(prompt)
 
     async def receive_response(self) -> AsyncIterator[Any]:
+        if self.hang:
+            await asyncio.sleep(3600)
+        if self.emit_rate_limit:
+            yield RateLimitEvent(
+                rate_limit_info=RateLimitInfo(status="allowed_warning", utilization=0.9),
+                uuid="rl",
+                session_id="sess-1",
+            )
         steps = self.script.pop(0)
         for i, step in enumerate(steps):
             if isinstance(step, str):
@@ -119,6 +138,10 @@ class FakeClient:
                     model="fake",
                 )
                 self.tool_results.append(await self._call_tool(tool_name, args))
+        if self.raise_result_error is not None:
+            # Mirrors the SDK: the CLI emits an error result then exits, surfaced as ResultError.
+            self.disconnected = True
+            raise self.raise_result_error
         if not self.omit_result:
             self.running_total += self.turn_cost  # the SDK reports a running total
             yield result_message(cost=self.running_total)
@@ -427,6 +450,85 @@ class TestDepartmentMatching:
             for i in range(MATCH_FALLBACK_TURN):
                 await session.send(str(i))
         assert session.to_dict()["match"]["departments"] == ["hr"]
+
+
+class TestInputValidation:
+    @pytest.mark.parametrize("bad", ["", "   ", "\n\t"])
+    def test_blank_rejected(self, bad: str) -> None:
+        with pytest.raises(ValueError, match="empty"):
+            validate_user_text(bad)
+
+    def test_too_long_rejected(self) -> None:
+        with pytest.raises(ValueError, match="limit is"):
+            validate_user_text("x" * (MAX_USER_TEXT_CHARS + 1))
+
+    def test_strips_and_passes_through(self) -> None:
+        assert validate_user_text("  hello  ") == "hello"
+
+    async def test_session_rejects_blank_before_spending(self) -> None:
+        session, created = make_session([["never used"]])
+        async with session:
+            with pytest.raises(ValueError):
+                await session.send("   ")
+            assert created[0].queries == []
+            assert session.turn == 0  # no turn consumed
+
+
+class TestFailureContainment:
+    async def test_result_error_becomes_error_turn_and_kills_session(self) -> None:
+        session, created = make_session([["Partial text"], ["never reached"]])
+        async with session:
+            created[0].raise_result_error = ResultError(
+                "Claude Code returned an error result: budget exceeded",
+                data={
+                    "subtype": "error_max_budget",
+                    "result": "budget exceeded",
+                    "terminal_reason": "max_budget",
+                },
+            )
+            result = await session.send("hi")
+
+            assert result.is_error
+            assert result.errors == ("max_budget: budget exceeded",)
+            assert result.assistant_text == "Partial text"  # what arrived is kept
+            assert session.failure is not None and "budget" in session.failure
+            with pytest.raises(SessionNotStartedError, match="budget"):
+                await session.send("again")
+        assert created[0].disconnected
+        assert session.to_dict()["failure"] == session.failure
+
+    async def test_idle_timeout_becomes_error_turn(self) -> None:
+        session, created = make_session([["x"]])
+        session.idle_timeout_s = 0.05
+        async with session:
+            created[0].hang = True
+            result = await session.send("hi")
+        assert result.is_error
+        assert "no response from the model" in result.errors[0]
+        assert session.failure is not None
+
+    async def test_rate_limit_event_is_logged_not_fatal(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session, created = make_session([["fine"]])
+        with caplog.at_level("WARNING", logger="blueprint.orchestrator"):
+            async with session:
+                created[0].emit_rate_limit = True
+                result = await session.send("hi")
+        assert not result.is_error and result.assistant_text == "fine"
+        warn = [r for r in caplog.records if r.getMessage() == "turn.rate_limit"]
+        assert len(warn) == 1
+        assert getattr(warn[0], "status", None) == "allowed_warning"
+
+    async def test_close_survives_disconnect_failure(self) -> None:
+        session, created = make_session([])
+        await session.start()
+
+        async def boom() -> None:
+            raise ProcessError("gone")
+
+        created[0].disconnect = boom  # type: ignore[method-assign]
+        await session.close()  # must not raise
 
 
 class TestSnapshot:
