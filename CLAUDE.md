@@ -41,7 +41,7 @@ When the stakeholder asks for an example on any category (e.g. "what's an exampl
 
 Four departments to start: HR, Finance, Sales, and Customer Success. Chosen as illustrative, not exhaustive, say so plainly in the README rather than implying full department coverage.
 
-Each department gets its own `SKILL.md` under `.claude/skills/`, holding that department's typical stakeholders and roles, typical systems and integrations (e.g. Finance: NetSuite, QuickBooks, Concur; Sales: Salesforce, HubSpot, Outreach; Customer Success: Zendesk, Intercom, Gainsight; HR: Workday, BambooHR, Greenhouse), typical input sources, and output-format patterns that tend to fit that department's work.
+Each department gets its own `SKILL.md` under `skills/` at the repo root (not `.claude/skills/`: these are the app's runtime data, loaded by our own parser, not Claude Code configuration), holding that department's typical stakeholders and roles, typical systems and integrations (e.g. Finance: NetSuite, QuickBooks, Concur; Sales: Salesforce, HubSpot, Outreach; Customer Success: Zendesk, Intercom, Gainsight; HR: Workday, BambooHR, Greenhouse), typical input sources, and output-format patterns that tend to fit that department's work.
 
 Two design decisions worth keeping deliberate, not accidental:
 

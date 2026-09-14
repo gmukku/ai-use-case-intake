@@ -1,10 +1,14 @@
 """Department skills: the static, procedural example banks for discovery.
 
-Each department is a ``.claude/skills/<name>/SKILL.md`` in the standard Claude Code skill
-format (YAML frontmatter + markdown body). We load them ourselves rather than through the
-SDK's ``skills`` option so that (a) which departments apply can change mid-conversation once
-the classifier has run, (b) the stakeholder session stays isolated from ``CLAUDE.md``, and
-(c) every example the model retrieves passes through a tool we control and log.
+Each department is a ``skills/<name>/SKILL.md`` at the repo root, in the standard Claude Code
+skill format (YAML frontmatter + markdown body). We load them ourselves rather than through
+the SDK's ``skills`` option so that (a) which departments apply can change mid-conversation
+once the classifier has run, (b) the stakeholder session stays isolated from ``CLAUDE.md``,
+and (c) every example the model retrieves passes through a tool we control and log.
+
+They live in ``skills/`` rather than ``.claude/skills/`` because they are the application's
+runtime data, not Claude Code configuration; keeping them out of ``.claude/`` also stops the
+coding assistant from discovering them as its own skills while working on this repo.
 
 Body headings are strict: one ``## <canvas category label>`` section per category, plus
 ``## Classification hints``. A heading outside that set is a load-time error, so a typo in a
@@ -14,6 +18,7 @@ skill file fails fast instead of silently dropping a category.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +30,10 @@ from blueprint.canvas import CanvasCategory
 
 logger = logging.getLogger(__name__)
 
-SKILLS_DIR: Final = Path(".claude") / "skills"
+# Resolved relative to the package, not the current working directory, so the app works no
+# matter where it is launched from. ``BLUEPRINT_SKILLS_DIR`` overrides it for deployments.
+_REPO_ROOT: Final = Path(__file__).resolve().parent.parent
+SKILLS_DIR: Final = Path(os.environ.get("BLUEPRINT_SKILLS_DIR", _REPO_ROOT / "skills"))
 HINTS_HEADING: Final = "Classification hints"
 
 _FRONTMATTER_RE: Final = re.compile(r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z", re.DOTALL)
