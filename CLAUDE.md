@@ -16,6 +16,7 @@ This is a portfolio project for Forward Deployed Engineer interviews. It's inten
 - At natural checkpoints, hand me a small, well-scoped piece to write myself before you write the rest, and check what I wrote before moving on.
 - When something breaks, walk me through how you're diagnosing it rather than just silently fixing it.
 - Tie new concepts back to things I already know: n8n, Copilot Studio, the PrismHR MCP server, the GitHub Actions plus Claude API translation pipeline, human-in-the-loop design. I've built the equivalent of a lot of this before, just not in this stack.
+- Keep `docs/LEARNING_LOG.md` current: append to it at every checkpoint (end of a build-order step, a decision with trade-offs, or a mistake that taught something). Progress table with commit hashes, one entry per concept the first time it's *used*, decisions with the options considered, mistakes kept rather than cleaned up.
 
 ## Where I'm starting from
 
