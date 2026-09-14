@@ -33,8 +33,10 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-14 | 3 | SOP library as an external stdio MCP server: eight synthetic SOPs, strict loader, IDF-weighted keyword search, `MCPServer` over stdio, wired via the SDK's `mcp_servers` stdio config next to the in-process canvas server. Live run: on "our onboarding checklist" the agent searched and read the packet-review SOP on turn 1, then asked whether the I-9 document inspection is part of the checklist pass. | `66c30bf` |
 
-State at last update: 159 tests, ruff + mypy `--strict` clean, steps 1–3 of 13 complete plus
-hardening and web search. Next: step 4 (completeness check and clarification loop).
+| 2026-09-14 | 4 | Completeness check and clarification loop: per-category rubric as data, a structured-output judge run inside the record tool so a gap becomes a follow-up in the same reply, a clarification budget of two per category, `is_ready_for_review` as the handoff decision, open gaps carried to the reviewer. Live run: "just the HR team" was flagged for dependents, the agent asked, the re-record passed. | `ab50855` |
+
+State at last update: 180 tests, ruff + mypy `--strict` clean, steps 1–4 of 13 complete plus
+hardening and web search. Next: step 5 (HITL gate).
 
 ---
 
@@ -146,6 +148,14 @@ one result. **Consequence:** a subagent cannot hold a multi-turn conversation wi
 which is why discovery is the *main* session (Decision: Option A). Subagents are reserved for
 run-to-completion jobs: the Builder (step 6).
 
+### Nested `query()` from inside a tool handler
+**What:** an in-process MCP tool handler runs inside the client's event loop while a session
+turn is in flight; calling `query()` from it spawns a second, independent CLI subprocess.
+**Verified** with a probe before building on it: ~3 s, no deadlock, outer session unaffected.
+**Here:** the completeness checker runs inside `record_canvas_answer`. **Cost of the pattern:**
+the check's latency lands before the model's text, so recording turns are a few seconds
+slower to start streaming. *`blueprint/orchestrator.py` `_assess`*
+
 ### Hooks: `PreToolUse`
 **What:** Python callbacks on lifecycle events (`PreToolUse`, `PostToolUse`, `Stop`,
 `SubagentStart`, …), registered as `hooks={"PreToolUse": [HookMatcher(matcher=<tool name>,
@@ -242,6 +252,24 @@ id tie-breaks give a ranker whose results are reproducible in tests and evals. T
 version without IDF ranked a QBR SOP above the I-9 SOP for a query full of "business days";
 the fix was in the ranker, not the test.
 
+### An independent judge, run inside the tool call
+**Options for who judges sufficiency:** the discovery model itself (self-grading, nothing to
+eval), a separate structured-output pass (independent, auditable, benchmarkable), or rules in
+code (brittle on prose). **Chosen:** the separate pass, with the rubric as data in `canvas.py`
+so the judge can only report gaps we defined. **When:** on each capture, not every turn and
+not only at the end. **How the gap reaches the stakeholder:** through the record tool's own
+response ("Incomplete: missing frequency. Ask something like: …"), so the follow-up lands in
+the same reply with no injection and no extra tool. A per-category budget of two follow-ups
+enforces "do not interrogate"; leftover gaps go to the reviewer instead of the stakeholder.
+Cost: ~1.8¢ per verdict, ~35% of a conversation; a settings flag and a model parameter, so it
+can be benchmarked down exactly like the classifier.
+
+### A judge that sees only the summary needs a "re-record, don't re-ask" rule
+The checker judges the recorded summary, not the transcript, by design (that is what the
+reviewer will read). So when the model omits a detail it already heard, the checker flags it
+and the naive response is to ask the stakeholder again. The prompt rule is: if the detail was
+already given, re-record with it; otherwise ask once. Found on the first live run.
+
 ### Classifier model chosen by benchmark, not by default
 20 labeled cases × 3 repeats. Opus 95% exact / 0 unstable; Sonnet 91.7% / 1 unstable. Kept
 Opus because *stability* is the property that matters for a once-per-conversation decision
@@ -276,6 +304,7 @@ project rules were added. "It's configured" is not evidence.
 | Windows console encoding crashed the CLI on `✓`, and the crash happened before the snapshot was written. | Force UTF-8 on stdout; write the most valuable output in a `finally`. |
 | Ran the real classifier from a unit test by accident (default `match_fn`). | Every external dependency needs an injection point with a fake default in the test helper. |
 | Typed the hook's return as `dict[str, Any]`; mypy rejected it against the SDK's `HookJSONOutput` union. | When an SDK publishes TypedDicts for a contract, use them: the type error is the documentation. |
+| Tests passed but took 22 s instead of 2 s: the fake client's real record tool called the real checker, which spawned real subprocesses that failed silently. | Test *duration* is a signal. Every new external call needs a fake default in the test helper before the first test run, not after. |
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 
@@ -286,7 +315,13 @@ project rules were added. "It's configured" is not evidence.
 - **Bedrock auth path**: `.env.example` documents it; not yet exercised. Verify before step 7.
 - **Transcript redaction**: stakeholder text lands verbatim in `runs/` and logs. Local-only
   today; step 12's SQLite store needs redaction and retention.
-- **HR skill file review** by the domain owner.
+- **HR skill file and rubric review** by the domain owner: `skills/hr/SKILL.md` and
+  `CATEGORY_RUBRIC` in `canvas.py` decide what the agent chases.
+- **User feedback in the requester view** (step 8): per-message 👍/👎 with optional comment,
+  end-of-conversation rating. Stored against `(session_id, turn)` in step 12; used as human
+  labels for judge validation in step 11. Keyed off `TurnResult`, so no trace change needed.
+- **Checker model benchmark**: same harness as `evals/skill_matching`, labeled (category,
+  summary) → missing elements; decide whether a cheaper model holds.
 - **Web search state sites**: the allowlist is federal only; state `.gov` sites are a per-
   deployment setting still to be added.
 - **"How small is the prototype"**: decided per output format when the Builder is built.
