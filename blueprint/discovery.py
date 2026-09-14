@@ -13,7 +13,9 @@ Split of responsibilities (keep it this way):
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Final
 
 from claude_agent_sdk import (
@@ -23,7 +25,7 @@ from claude_agent_sdk import (
     create_sdk_mcp_server,
     tool,
 )
-from claude_agent_sdk.types import HookEvent
+from claude_agent_sdk.types import HookEvent, McpServerConfig, McpStdioServerConfig
 
 from blueprint.canvas import (
     CATEGORY_QUESTIONS,
@@ -32,6 +34,11 @@ from blueprint.canvas import (
     CanvasState,
 )
 from blueprint.skills import DepartmentSkill
+from blueprint.sop_server import LIST_TOOL as SOP_LIST_TOOL
+from blueprint.sop_server import READ_TOOL as SOP_READ_TOOL
+from blueprint.sop_server import SEARCH_TOOL as SOP_SEARCH_TOOL
+from blueprint.sop_server import SERVER_NAME as SOP_SERVER_NAME
+from blueprint.sops import SOP_DIR
 from blueprint.websearch import (
     TOOL_NAME as WEB_SEARCH_TOOL_NAME,
 )
@@ -48,6 +55,12 @@ RECORD_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{RECORD_TOOL_NAME}"
 EXAMPLES_TOOL_NAME: Final = "department_examples"
 EXAMPLES_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{EXAMPLES_TOOL_NAME}"
 WEB_SEARCH_TOOL_FULL_NAME: Final = f"mcp__{CANVAS_SERVER_NAME}__{WEB_SEARCH_TOOL_NAME}"
+# External stdio server: the SDK names its tools mcp__<server>__<tool> exactly like ours.
+SOP_SEARCH_TOOL_FULL_NAME: Final = f"mcp__{SOP_SERVER_NAME}__{SOP_SEARCH_TOOL}"
+SOP_READ_TOOL_FULL_NAME: Final = f"mcp__{SOP_SERVER_NAME}__{SOP_READ_TOOL}"
+SOP_LIST_TOOL_FULL_NAME: Final = f"mcp__{SOP_SERVER_NAME}__{SOP_LIST_TOOL}"
+
+_REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 
 # Callable the orchestrator supplies: which department skills currently apply (may be empty
 # before the classifier has run).
@@ -106,6 +119,42 @@ def _render_canvas_section() -> str:
     return "\n".join(lines)
 
 
+def sop_server_config(sop_dir: Path = SOP_DIR) -> McpStdioServerConfig:
+    """Stdio launch config for the SOP library server.
+
+    The SDK spawns ``<this interpreter> -m blueprint.sop_server`` and speaks MCP to it over
+    stdin/stdout. ``sys.executable`` guarantees the venv that has our package; ``PYTHONPATH``
+    makes the package importable regardless of the spawn cwd; ``PYTHONIOENCODING`` keeps the
+    transport UTF-8 on Windows consoles.
+    """
+    return {
+        "type": "stdio",
+        "command": sys.executable,
+        "args": ["-m", "blueprint.sop_server"],
+        "env": {
+            "PYTHONPATH": str(_REPO_ROOT),
+            "PYTHONIOENCODING": "utf-8",
+            "BLUEPRINT_SOP_DIR": str(sop_dir),
+        },
+    }
+
+
+def _sop_section() -> str:
+    return f"""
+
+# Looking up existing process documents
+
+You have access to the company's internal SOP library. When the stakeholder refers to an \
+existing process, checklist, policy, or procedure (for example "our onboarding checklist", \
+"the expense policy", "how we escalate tickets"), call `{SOP_SEARCH_TOOL}` with a short topic \
+before asking your next question, and `{SOP_READ_TOOL}` if a match looks relevant. Use what \
+the SOP says to ask ONE sharper follow-up: whether a documented step, deadline, or control is \
+actually part of what they do today, or where their practice differs from the document. \
+Mention the SOP title in the recorded summary when it informed the capture. Never recite the \
+SOP to the stakeholder or treat it as the truth about their process; they are the authority \
+on what actually happens."""
+
+
 def _web_search_section(max_searches: int) -> str:
     return f"""
 
@@ -120,7 +169,7 @@ phrases; never include names, company details, or anything the stakeholder said 
 If you rely on a result, mention the source title in the recorded summary."""
 
 
-def build_system_prompt(*, web_search_max: int | None = None) -> str:
+def build_system_prompt(*, web_search_max: int | None = None, sop_grounding: bool = False) -> str:
     """Build the discovery system prompt from the canvas definition.
 
     Derived from ``canvas.py`` rather than hand-written so the prompt and the state machine
@@ -128,8 +177,11 @@ def build_system_prompt(*, web_search_max: int | None = None) -> str:
 
     Args:
         web_search_max: When set, adds the scoped web-search section with this per-session cap.
+        sop_grounding: When true, adds the SOP-library section.
     """
-    extra = _web_search_section(web_search_max) if web_search_max is not None else ""
+    extra = (_sop_section() if sop_grounding else "") + (
+        _web_search_section(web_search_max) if web_search_max is not None else ""
+    )
     return f"""You are a discovery consultant helping a non-technical stakeholder shape an idea \
 for an AI or automation use case. Your job is to run a structured discovery conversation, \
 then hand a clear spec to a human reviewer. You do not build anything.
@@ -278,6 +330,8 @@ def build_discovery_options(
     max_budget_usd: float | None = None,
     web_search: SearchClient | None = None,
     web_search_guard: WebSearchGuard | None = None,
+    sop_grounding: bool = True,
+    sop_dir: Path = SOP_DIR,
 ) -> ClaudeAgentOptions:
     """Assemble the SDK options for one discovery session.
 
@@ -292,11 +346,19 @@ def build_discovery_options(
             prompt section, and the capping ``PreToolUse`` hook are all wired in together.
         web_search_guard: The guard to use (owned by the caller so it can read the attempts);
             a default one is created if ``web_search`` is given without it.
+        sop_grounding: Attach the SOP library as an external stdio MCP server (see
+            :func:`sop_server_config`). On by default; it is local and deterministic.
+        sop_dir: Directory the SOP server should load; overridable for tests.
     """
     tools = [build_record_tool(state, current_turn), build_examples_tool(matched_skills)]
     allowed = [RECORD_TOOL_FULL_NAME, EXAMPLES_TOOL_FULL_NAME]
     hooks: dict[HookEvent, list[HookMatcher]] = {}
     web_search_max: int | None = None
+    servers: dict[str, McpServerConfig] = {}
+
+    if sop_grounding:
+        servers[SOP_SERVER_NAME] = sop_server_config(sop_dir)
+        allowed.extend([SOP_SEARCH_TOOL_FULL_NAME, SOP_READ_TOOL_FULL_NAME])
 
     if web_search is not None:
         guard = web_search_guard or WebSearchGuard()
@@ -307,16 +369,20 @@ def build_discovery_options(
         hooks["PreToolUse"] = [guard.matcher(WEB_SEARCH_TOOL_FULL_NAME)]
         web_search_max = guard.max_calls
 
-    server = create_sdk_mcp_server(name=CANVAS_SERVER_NAME, tools=tools)
+    # In-process server (canvas tools) and, optionally, the external stdio server (SOPs) sit
+    # side by side in the same dict; the SDK handles the transport difference.
+    servers[CANVAS_SERVER_NAME] = create_sdk_mcp_server(name=CANVAS_SERVER_NAME, tools=tools)
 
     return ClaudeAgentOptions(
         model=model,
-        system_prompt=build_system_prompt(web_search_max=web_search_max),
+        system_prompt=build_system_prompt(
+            web_search_max=web_search_max, sop_grounding=sop_grounding
+        ),
         # Isolation: never inherit CLAUDE.md or ~/.claude settings into a stakeholder session.
         setting_sources=[],
         # No built-in tools at all (no Read/Bash/etc. schemas in context); only our MCP tools.
         tools=[],
-        mcp_servers={CANVAS_SERVER_NAME: server},
+        mcp_servers=servers,
         # Pre-approve our tools so they run without a permission prompt.
         allowed_tools=allowed,
         hooks=hooks or None,

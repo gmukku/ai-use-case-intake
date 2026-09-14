@@ -59,8 +59,10 @@ async def _stream_turn(session: DiscoverySession, text: str) -> TurnResult:
             case TextDelta(text=chunk):
                 print(chunk, end="", flush=True)
             case ToolCallStarted(name=name):
-                # The UI equivalent is a typing indicator; the CLI shows which tool for the trace.
-                print("⌕" if name.endswith("web_search") else "·", end="", flush=True)
+                # The UI equivalent is a typing indicator; the CLI shows which tool for the trace:
+                # ⌕ web search, § SOP library, · canvas bookkeeping.
+                glyph = "⌕" if name.endswith("web_search") else "§" if "__sop__" in name else "·"
+                print(glyph, end="", flush=True)
             case DepartmentsMatched(match=match):
                 # Admin-trace only; a requester UI would not render this.
                 print(f"\n  [matched: {', '.join(match.departments)}]", end="", flush=True)
@@ -105,6 +107,7 @@ async def run(settings: Settings, *, script: Path | None) -> int:
         max_budget_usd=settings.max_budget_usd,
         idle_timeout_s=settings.idle_timeout_s,
         web_search=search,
+        sop_grounding=settings.sop_grounding,
     )
 
     try:

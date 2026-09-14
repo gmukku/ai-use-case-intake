@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 import jsonschema
@@ -10,11 +11,14 @@ from blueprint.discovery import (
     RECORD_TOOL_FULL_NAME,
     RECORD_TOOL_NAME,
     RECORD_TOOL_SCHEMA,
+    SOP_READ_TOOL_FULL_NAME,
+    SOP_SEARCH_TOOL_FULL_NAME,
     WEB_SEARCH_TOOL_FULL_NAME,
     build_discovery_options,
     build_examples_tool,
     build_record_tool,
     build_system_prompt,
+    sop_server_config,
 )
 from blueprint.skills import SKILLS_DIR, load_skills
 from blueprint.websearch import SearchResult, WebSearchGuard
@@ -160,10 +164,43 @@ class TestDiscoveryOptions:
         options = build_discovery_options(CanvasState(), lambda: 0, lambda: [])
         assert options.setting_sources == []
         assert options.tools == []
-        assert options.allowed_tools == [RECORD_TOOL_FULL_NAME, EXAMPLES_TOOL_FULL_NAME]
+        assert options.allowed_tools == [
+            RECORD_TOOL_FULL_NAME,
+            EXAMPLES_TOOL_FULL_NAME,
+            SOP_SEARCH_TOOL_FULL_NAME,
+            SOP_READ_TOOL_FULL_NAME,
+        ]
         assert isinstance(options.system_prompt, str)
         assert options.include_partial_messages is True
-        assert isinstance(options.mcp_servers, dict) and "canvas" in options.mcp_servers
+        assert isinstance(options.mcp_servers, dict)
+        assert set(options.mcp_servers) == {"canvas", "sop"}
+
+    def test_sop_server_is_an_external_stdio_config(self) -> None:
+        import sys
+
+        options = build_discovery_options(CanvasState(), lambda: 0, lambda: [])
+        servers: dict[str, Any] = dict(options.mcp_servers)  # type: ignore[arg-type]
+        sop = servers["sop"]
+        assert sop["type"] == "stdio"
+        assert sop["command"] == sys.executable
+        assert sop["args"] == ["-m", "blueprint.sop_server"]
+        assert "PYTHONPATH" in sop["env"] and "BLUEPRINT_SOP_DIR" in sop["env"]
+        # The in-process canvas server is a different shape entirely.
+        assert servers["canvas"]["type"] == "sdk"
+        prompt = str(options.system_prompt)
+        assert "# Looking up existing process documents" in prompt
+        assert "`search_sops`" in prompt and "`read_sop`" in prompt
+        assert "they are the authority" in prompt
+
+    def test_sop_grounding_can_be_disabled(self) -> None:
+        options = build_discovery_options(CanvasState(), lambda: 0, lambda: [], sop_grounding=False)
+        assert set(options.mcp_servers) == {"canvas"}  # type: ignore[arg-type]
+        assert SOP_SEARCH_TOOL_FULL_NAME not in options.allowed_tools
+        assert "search_sops" not in str(options.system_prompt)
+
+    def test_sop_dir_override_reaches_the_server_env(self, tmp_path: Path) -> None:
+        cfg = sop_server_config(tmp_path)
+        assert cfg["env"]["BLUEPRINT_SOP_DIR"] == str(tmp_path)
 
     def test_web_search_off_by_default(self) -> None:
         options = build_discovery_options(CanvasState(), lambda: 0, lambda: [])

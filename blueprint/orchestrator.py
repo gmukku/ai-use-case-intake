@@ -203,6 +203,7 @@ class DiscoverySession:
         idle_timeout_s: float = DEFAULT_IDLE_TIMEOUT_S,
         web_search: SearchClient | None = None,
         max_web_searches: int = DEFAULT_MAX_SEARCHES_PER_SESSION,
+        sop_grounding: bool = True,
     ) -> None:
         self.state = CanvasState()
         self.turn = 0
@@ -231,6 +232,7 @@ class DiscoverySession:
             max_budget_usd=max_budget_usd,
             web_search=web_search,
             web_search_guard=self.web_search_guard,
+            sop_grounding=sop_grounding,
         )
         self._client_factory = client_factory
         self._client: ClaudeSDKClient | None = None

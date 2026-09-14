@@ -1,0 +1,9 @@
+# HR stakeholder who refers to an existing checklist; exercises the SOP library lookup.
+Hi, I run onboarding for new hires and reviewing each packet against our onboarding checklist takes forever.
+It's me and two coordinators on HR ops. Hiring managers wait on us, and payroll needs the packet before the first pay run.
+A coordinator opens the packet, goes down our checklist, and emails the new hire if something is missing. Around 30 hires a month, so daily.
+Time mostly, 20 to 30 minutes per packet, and we still miss fields which causes payroll problems later.
+The packets come in through our onboarding tool, signed PDFs go to SharePoint, and the data ends up in ADP.
+The checklist and the state requirements guide are both in SharePoint.
+Scanned or e-signed PDFs of the forms, plus a coordinator sometimes asking "is this packet complete?"
+I want a checklist result per packet that says what's missing, and a way to ask questions about the requirements. It shouldn't fill anything in.

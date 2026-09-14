@@ -72,6 +72,12 @@ class TestWebSearch:
         assert not s.web_search_enabled
 
 
+class TestSopGrounding:
+    def test_on_by_default_and_switchable(self) -> None:
+        assert load_settings(API).sop_grounding is True
+        assert load_settings({**API, "BLUEPRINT_SOP_GROUNDING": "0"}).sop_grounding is False
+
+
 class TestNoSecretLeak:
     def test_to_dict_never_contains_secret_values(self) -> None:
         s = load_settings({**API, "TAVILY_API_KEY": "tvly-secret"})

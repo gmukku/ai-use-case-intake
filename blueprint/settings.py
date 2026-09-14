@@ -38,6 +38,7 @@ class Settings:
     idle_timeout_s: float
     web_search_enabled: bool
     tavily_api_key: str | None
+    sop_grounding: bool
 
     def to_dict(self) -> dict[str, Any]:
         """Loggable view: presence of secrets, never their values."""
@@ -49,6 +50,7 @@ class Settings:
             "idle_timeout_s": self.idle_timeout_s,
             "web_search_enabled": self.web_search_enabled,
             "tavily_api_key_set": self.tavily_api_key is not None,
+            "sop_grounding": self.sop_grounding,
         }
 
 
@@ -122,4 +124,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         idle_timeout_s=_float(env, "BLUEPRINT_IDLE_TIMEOUT_S", DEFAULT_IDLE_TIMEOUT_S, minimum=1),
         web_search_enabled=web_search_enabled,
         tavily_api_key=tavily_api_key,
+        sop_grounding=_flag(env, "BLUEPRINT_SOP_GROUNDING", default=True),
     )
