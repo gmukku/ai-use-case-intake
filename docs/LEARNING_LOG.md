@@ -28,10 +28,11 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 | 2026-09-14 | 2 | Classifier benchmark: 20 labeled cases, Opus vs Sonnet × 3 repeats. Opus kept on stability. One label corrected by the evidence. | `b98e85f` |
 | 2026-09-14 | — | Hardening: SDK error containment, idle timeout, input validation, validated settings, pre-commit + CI with secret scanning. | `d9be267` |
 | 2026-09-14 | — | Project gitleaks rules after the default rule missed a plausible key shape. | `5c28038` |
+| 2026-09-14 | — | This learning log, and the CLAUDE.md rule to keep it current. | `ac08c32` |
+| 2026-09-14 | — | Scoped web search (Tavily) as an in-process tool with a domain allowlist, plus a `PreToolUse` hook capping calls per session. First hook. Live run: one search, generic query, USCIS-only results, cited in the recorded summary. | `f4ffa8e` |
 
-State at last update: 117 tests, ruff + mypy `--strict` clean, steps 1–2 of 13 complete.
-Next: Tavily web search (route B, in-process tool + `PreToolUse` hook), then step 3 (SOP stdio
-MCP server).
+State at last update: 134 tests, ruff + mypy `--strict` clean, steps 1–2 of 13 complete plus
+hardening and web search. Next: step 3 (SOP stdio MCP server).
 
 ---
 
@@ -130,10 +131,18 @@ one result. **Consequence:** a subagent cannot hold a multi-turn conversation wi
 which is why discovery is the *main* session (Decision: Option A). Subagents are reserved for
 run-to-completion jobs: the Builder (step 6).
 
-### Hooks (next up)
-**What:** `PreToolUse` / `PostToolUse` / `Stop` / … Python callbacks that observe, block, or
-modify tool calls; the `beforeEach` of the agent loop. **Planned:** per-session cap and query
-log on web search; file-write gating for the Builder.
+### Hooks: `PreToolUse`
+**What:** Python callbacks on lifecycle events (`PreToolUse`, `PostToolUse`, `Stop`,
+`SubagentStart`, …), registered as `hooks={"PreToolUse": [HookMatcher(matcher=<tool name>,
+hooks=[fn])]}`. The callback signature is `async (input, tool_use_id, context)`; for
+`PreToolUse`, `input["tool_name"]` and `input["tool_input"]` are available, and returning
+`{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+"permissionDecisionReason": "..."}}` blocks the call and shows the reason to the model.
+Returning `{}` allows. **Here:** `WebSearchGuard.hook` caps `web_search` at N per session and
+records every attempt. The tool never knows the guard exists; that separation is the point,
+the `beforeEach` of the agent loop. **Gotcha:** the return type is the SDK's `HookJSONOutput`
+TypedDict, not a bare dict; mypy enforces the shape. **Next use:** gating the Builder's file
+writes. *`blueprint/websearch.py`*
 
 ### Sessions (learned conceptually; not yet used)
 **What:** sessions persist on disk; `resume=session_id` continues one later, `fork_session`
@@ -194,6 +203,15 @@ Model → tool: JSON schema plus handler checks with messages the model can act 
 program: `settings.py` fails at startup naming the variable. Stakeholder → model: blank
 rejected, length capped, before anything is billed.
 
+### Web search: route B, scoped to regulatory grounding
+**Options:** (A) Tavily's official MCP server via `npx` (stdio, no code, model sees the full
+parameter surface); (B) our own in-process tool over Tavily's REST API. **Chosen:** B.
+**Why:** the safety properties (domain allowlist, result cap, snippet trim, key handling, per-
+session cap) belong in code, not prose. Scope is deliberately narrow: search sharpens a
+follow-up, never answers the stakeholder; queries must be generic; off by default and always
+off in evals so gold outcomes stay reproducible. The one-line rule that carries the design:
+*grounding for questions, not answers.*
+
 ### Classifier model chosen by benchmark, not by default
 20 labeled cases × 3 repeats. Opus 95% exact / 0 unstable; Sonnet 91.7% / 1 unstable. Kept
 Opus because *stability* is the property that matters for a once-per-conversation decision
@@ -227,6 +245,7 @@ project rules were added. "It's configured" is not evidence.
 | Test set a fake-client flag before `start()` created the client → `IndexError`, initially misread as a logging problem. | Read the traceback line before theorizing. |
 | Windows console encoding crashed the CLI on `✓`, and the crash happened before the snapshot was written. | Force UTF-8 on stdout; write the most valuable output in a `finally`. |
 | Ran the real classifier from a unit test by accident (default `match_fn`). | Every external dependency needs an injection point with a fake default in the test helper. |
+| Typed the hook's return as `dict[str, Any]`; mypy rejected it against the SDK's `HookJSONOutput` union. | When an SDK publishes TypedDicts for a contract, use them: the type error is the documentation. |
 
 ---
 
@@ -236,5 +255,6 @@ project rules were added. "It's configured" is not evidence.
 - **Transcript redaction**: stakeholder text lands verbatim in `runs/` and logs. Local-only
   today; step 12's SQLite store needs redaction and retention.
 - **HR skill file review** by the domain owner.
-- **Web search scope**: regulatory grounding only, off by default, always off in evals.
+- **Web search state sites**: the allowlist is federal only; state `.gov` sites are a per-
+  deployment setting still to be added.
 - **"How small is the prototype"**: decided per output format when the Builder is built.
