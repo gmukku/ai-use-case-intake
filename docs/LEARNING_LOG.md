@@ -35,8 +35,10 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-14 | 4 | Completeness check and clarification loop: per-category rubric as data, a structured-output judge run inside the record tool so a gap becomes a follow-up in the same reply, a clarification budget of two per category, `is_ready_for_review` as the handoff decision, open gaps carried to the reviewer. Live run: "just the HR team" was flagged for dependents, the agent asked, the re-record passed. | `ab50855` |
 
-State at last update: 180 tests, ruff + mypy `--strict` clean, steps 1–4 of 13 complete plus
-hardening and web search. Next: step 5 (HITL gate).
+| 2026-09-14 | 5 | HITL gate: compiled spec from the snapshot, rule-based risk with evidence per flag, append-only review log with validated decisions, send-back delivered through the SDK's `resume=` as a reviewer-framed instruction turn. CLI grew `review` and `resume`. Live round trip: send-back → resume → the agent asked for the intake system's product name → re-recorded as v2 → spec v2. | `a91b3af` |
+
+State at last update: 203 tests, ruff + mypy `--strict` clean, steps 1–5 of 13 complete plus
+hardening and web search. Next: step 6 (Builder subagent).
 
 ---
 
@@ -169,9 +171,25 @@ the `beforeEach` of the agent loop. **Gotcha:** the return type is the SDK's `Ho
 TypedDict, not a bare dict; mypy enforces the shape. **Next use:** gating the Builder's file
 writes. *`blueprint/websearch.py`*
 
-### Sessions (learned conceptually; not yet used)
-**What:** sessions persist on disk; `resume=session_id` continues one later, `fork_session`
-branches. **Planned:** reopening a conversation when the reviewer sends it back (step 5).
+### Sessions: `resume=`
+**What:** the CLI persists each session's transcript on disk; `ClaudeAgentOptions(resume=
+session_id)` reconnects a *new* subprocess to it with full context. Our options (custom
+prompt, both MCP servers, hooks) are supplied again on reconnect; the model's memory comes
+from the transcript, ours from the snapshot. `fork_session` / `resume_session_at` branch from
+an earlier point (not used yet). **Here:** `DiscoverySession(snapshot=...)` rebuilds every
+Python-side log *before* building the tools (the record tool closes over the state object),
+then sets `resume`. **Gotchas:** (1) the SDK's running cost total restarts at zero in the new
+subprocess: carry the earlier spend as an offset or per-turn cost goes negative (it did, in
+the first live round trip). (2) `resume` is a *process* boundary as well as a time boundary;
+anything not in the snapshot is gone. *`blueprint/orchestrator.py` `_restore`*
+
+### Instruction turns: a reviewer speaks through the model
+**What:** the SDK conversation has only user and assistant turns, so a message from someone
+other than the stakeholder must be *framed* ("REVIEWER NOTE (the stakeholder cannot see
+this): … ask them about this in your own words; do not mention a reviewer"). The model's reply
+is what the stakeholder sees. **Here:** `send_reviewer_note`; the trace stores the raw note
+with `origin="reviewer"` so the requester view can hide it. Same mechanism Claude Code uses
+for its own system reminders. Verified in a probe before building on it.
 
 ---
 
@@ -270,6 +288,21 @@ reviewer will read). So when the model omits a detail it already heard, the chec
 and the naive response is to ask the stakeholder again. The prompt rule is: if the detail was
 already given, re-record with it; otherwise ask once. Found on the first live run.
 
+### Risk as rules with evidence, not a score
+**Options:** a model-produced risk score (opaque; what CLAUDE.md warns against) or rules in
+code, each flag carrying the matched text. **Chosen:** rules. `named_integration` is seeded
+from the department skills' own system lists, so the taxonomy does double duty;
+`writes_to_system` is negation-aware because every HR run's summary says "out of scope:
+writing into the HRIS" and must *not* fire; overall level is the highest flag. The reviewer
+sees "matched 'ADP' in system_integrations", and the false-negative eval (step 11) has
+something concrete to measure. A model opinion can be added later as one more flag.
+
+### The gate works on snapshots, not live sessions
+Review happens hours after the conversation, so `compile_spec` and `assess_risk` take the
+`to_dict()` snapshot and nothing else. Same code path for a run loaded from disk or from the
+audit store, and pure data in/out for tests. Every snapshot-carried type got a `from_dict`
+inverse; the snapshot is now the session's persistence format in all but name.
+
 ### Classifier model chosen by benchmark, not by default
 20 labeled cases × 3 repeats. Opus 95% exact / 0 unstable; Sonnet 91.7% / 1 unstable. Kept
 Opus because *stability* is the property that matters for a once-per-conversation decision
@@ -305,6 +338,9 @@ project rules were added. "It's configured" is not evidence.
 | Ran the real classifier from a unit test by accident (default `match_fn`). | Every external dependency needs an injection point with a fake default in the test helper. |
 | Typed the hook's return as `dict[str, Any]`; mypy rejected it against the SDK's `HookJSONOutput` union. | When an SDK publishes TypedDicts for a contract, use them: the type error is the documentation. |
 | Tests passed but took 22 s instead of 2 s: the fake client's real record tool called the real checker, which spawned real subprocesses that failed silently. | Test *duration* is a signal. Every new external call needs a fake default in the test helper before the first test run, not after. |
+| Per-turn cost showed `$-0.1161` on the first resumed turn. The SDK's running total restarts in the new subprocess; the delta against the restored total went negative. | Read every number in a trace, not just the ones you are looking for. Cost across a process boundary needs an explicit offset. |
+| Shell heredoc patches mangled `
+` escapes for the fourth time (CLI rewrite, orchestrator framing string). | Rule, finally applied: files containing escapes are written with the editor tool, never through a shell heredoc. |
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 
@@ -322,6 +358,10 @@ project rules were added. "It's configured" is not evidence.
   labels for judge validation in step 11. Keyed off `TurnResult`, so no trace change needed.
 - **Checker model benchmark**: same harness as `evals/skill_matching`, labeled (category,
   summary) → missing elements; decide whether a cheaper model holds.
+- **Risk-gate false-negative eval** (step 11): labeled snapshots that *should* flag, run
+  through `assess_risk`; the rules are deterministic so this is cheap and exact.
+- **Spec title fallback is ugly** (first 80 chars of the opener); `--summarize` fixes it for
+  ~1¢. The reviewer view should always use the summarized title.
 - **Web search state sites**: the allowlist is federal only; state `.gov` sites are a per-
   deployment setting still to be added.
 - **"How small is the prototype"**: decided per output format when the Builder is built.
