@@ -21,6 +21,7 @@ import jsonschema
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, Message, ResultMessage, query
 
 from blueprint.discovery import DEFAULT_MODEL
+from blueprint.isolation import AGENT_ENV
 from blueprint.skills import DepartmentSkill
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,7 @@ async def match_departments(
         model=model,
         system_prompt=CLASSIFIER_SYSTEM_PROMPT,
         setting_sources=[],
+        env=AGENT_ENV,
         tools=[],
         # Structured output is delivered through a hidden tool round-trip, so a single
         # agentic turn is not enough; 1 was intermittently hit in the benchmark.

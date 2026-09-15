@@ -22,6 +22,7 @@ import jsonschema
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, Message, ResultMessage, query
 
 from blueprint.canvas import CATEGORY_RUBRIC, CanvasCategory
+from blueprint.isolation import AGENT_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,7 @@ async def assess_capture(
         model=model,
         system_prompt=CHECKER_SYSTEM_PROMPT,
         setting_sources=[],
+        env=AGENT_ENV,
         tools=[],
         max_turns=CHECKER_MAX_TURNS,
         effort="low",

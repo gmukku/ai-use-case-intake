@@ -171,6 +171,7 @@ class TestDiscoveryOptions:
             SOP_READ_TOOL_FULL_NAME,
         ]
         assert isinstance(options.system_prompt, str)
+        assert options.env == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
         assert options.include_partial_messages is True
         assert isinstance(options.mcp_servers, dict)
         assert set(options.mcp_servers) == {"canvas", "sop"}

@@ -35,6 +35,7 @@ from blueprint.canvas import (
     CanvasState,
 )
 from blueprint.completeness import Assessment
+from blueprint.isolation import AGENT_ENV
 from blueprint.skills import DepartmentSkill
 from blueprint.sop_server import LIST_TOOL as SOP_LIST_TOOL
 from blueprint.sop_server import READ_TOOL as SOP_READ_TOOL
@@ -417,6 +418,7 @@ def build_discovery_options(
         ),
         # Isolation: never inherit CLAUDE.md or ~/.claude settings into a stakeholder session.
         setting_sources=[],
+        env=AGENT_ENV,
         # No built-in tools at all (no Read/Bash/etc. schemas in context); only our MCP tools.
         tools=[],
         mcp_servers=servers,

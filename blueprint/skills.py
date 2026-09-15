@@ -69,6 +69,26 @@ class DepartmentSkill:
         }
 
 
+def parse_skill_frontmatter(text: str, *, source: str = "<string>") -> tuple[dict[str, Any], str]:
+    """Split a SKILL.md into its validated frontmatter mapping and markdown body.
+
+    Shared by department skills and builder templates, which use the same file format.
+
+    Raises:
+        SkillLoadError: on a missing frontmatter block, invalid YAML, or a non-mapping.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        raise SkillLoadError(f"{source}: missing YAML frontmatter block")
+    try:
+        meta = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        raise SkillLoadError(f"{source}: invalid frontmatter YAML: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise SkillLoadError(f"{source}: frontmatter must be a mapping")
+    return meta, match.group(2)
+
+
 def parse_skill(text: str, *, source: str = "<string>") -> DepartmentSkill:
     """Parse one SKILL.md document.
 
@@ -76,16 +96,7 @@ def parse_skill(text: str, *, source: str = "<string>") -> DepartmentSkill:
         SkillLoadError: on missing frontmatter, missing ``name``/``description``, an unknown
             heading, a missing canvas category, or an empty section.
     """
-    match = _FRONTMATTER_RE.match(text)
-    if match is None:
-        raise SkillLoadError(f"{source}: missing YAML frontmatter block")
-
-    try:
-        meta = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
-        raise SkillLoadError(f"{source}: invalid frontmatter YAML: {exc}") from exc
-    if not isinstance(meta, dict):
-        raise SkillLoadError(f"{source}: frontmatter must be a mapping")
+    meta, body = parse_skill_frontmatter(text, source=source)
 
     name = meta.get("name")
     description = meta.get("description")
@@ -94,7 +105,7 @@ def parse_skill(text: str, *, source: str = "<string>") -> DepartmentSkill:
     if not isinstance(description, str) or not description.strip():
         raise SkillLoadError(f"{source}: frontmatter 'description' is required")
 
-    sections = _split_sections(match.group(2))
+    sections = _split_sections(body)
 
     hints_section = sections.pop(HINTS_HEADING.lower(), None)
     if hints_section is None:

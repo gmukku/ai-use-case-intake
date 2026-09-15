@@ -7,6 +7,7 @@ Usage::
     uv run python cli.py review runs/<id>.json              # compile spec + risk, no decision
     uv run python cli.py review runs/<id>.json --send-back --note "Which HRIS?" --reviewer me
     uv run python cli.py resume runs/<id>.json              # reopen; delivers the send-back note
+    uv run python cli.py build runs/<id>.json               # build the prototype (approved runs)
 
 Prints the assistant's replies plus a one-line trace per turn. On exit, writes the full
 session snapshot (canvas + every turn) to ``runs/<session_id>.json`` and JSON-line logs to
@@ -27,6 +28,12 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from blueprint.builder import (
+    PROTOTYPES_DIR,
+    UnsupportedOutputFormatError,
+    build_prototype,
+    select_template,
+)
 from blueprint.canvas import CanvasCategory
 from blueprint.observability import configure_logging
 from blueprint.orchestrator import (
@@ -303,6 +310,52 @@ async def cmd_review(
     return 0
 
 
+async def cmd_build(settings: Settings, *, run_file: Path, force: bool) -> int:
+    """Build the prototype for an approved run. The result is written into the run file."""
+    snapshot = _load_snapshot(run_file)
+    status = snapshot.get("review_status", "pending")
+    if status != "approved" and not force:
+        print(f"refusing to build: review status is '{status}', not 'approved'", file=sys.stderr)
+        return 3
+    skills = load_skills()
+    stored = snapshot.get("spec")
+    spec = compile_spec(
+        snapshot,
+        skills,
+        version=int(stored["version"]) if stored else 1,
+        title=stored["title"] if stored else None,
+        narrative=stored["narrative"] if stored else None,
+    )
+    try:
+        template = select_template(spec)
+    except UnsupportedOutputFormatError as exc:
+        print(f"cannot build: {exc}", file=sys.stderr)
+        return 4
+    workspace = PROTOTYPES_DIR / spec.session_id
+    print(f"\n== building '{spec.title}' ({template}) ==\n   workspace: {workspace}")
+    result = await build_prototype(
+        spec, workspace=workspace, model=settings.model, max_budget_usd=settings.build_budget_usd
+    )
+    snapshot["build"] = result.to_dict()
+    run_file.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+
+    v = result.verification
+    print(f"\nfiles: {', '.join(v.files) or '-'}  ({v.total_lines} lines)")
+    print(f"tests: {'passed' if v.tests_passed else 'FAILED'}")
+    if v.violations:
+        print("violations: " + "; ".join(v.violations))
+    denied = [d for d in result.guard["decisions"] if not d["allowed"]]
+    print(f"guard: {len(result.guard['decisions'])} calls, {len(denied)} denied")
+    for d in denied:
+        print(f"   - {d['tool']} {d['target'][:70]!r}: {d['reason']}")
+    cost = f"${result.cost_usd:.4f}" if result.cost_usd is not None else "$?"
+    print(f"cost: {cost} · {result.duration_ms} ms · {'OK' if result.ok else 'NOT OK'}")
+    if result.errors:
+        print("errors: " + "; ".join(result.errors), file=sys.stderr)
+    print(f"\nbuilder report:\n{result.report}")
+    return 0 if result.ok else 1
+
+
 def main() -> None:
     """Parse args, configure logging, dispatch."""
     parser = argparse.ArgumentParser(description="Blueprint AI hand-testing CLI.")
@@ -326,6 +379,10 @@ def main() -> None:
     resume = sub.add_parser("resume", help="reopen a saved session (delivers a pending send-back)")
     resume.add_argument("run_file", type=Path)
     resume.add_argument("--script", type=Path)
+
+    build = sub.add_parser("build", help="build the prototype for an approved run")
+    build.add_argument("run_file", type=Path)
+    build.add_argument("--force", action="store_true", help="build even if not approved (dev only)")
 
     args = parser.parse_args()
 
@@ -359,6 +416,8 @@ def main() -> None:
                 summarize=args.summarize,
             )
         )
+    elif command == "build":
+        code = asyncio.run(cmd_build(settings, run_file=args.run_file, force=args.force))
     else:
         code = asyncio.run(cmd_resume(settings, run_file=args.run_file, script=args.script))
     sys.exit(code)

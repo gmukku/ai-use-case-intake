@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from blueprint.builder import DEFAULT_BUILD_BUDGET_USD
 from blueprint.completeness import DEFAULT_CHECKER_MODEL
 from blueprint.discovery import DEFAULT_MODEL
 from blueprint.orchestrator import DEFAULT_IDLE_TIMEOUT_S
@@ -42,6 +43,7 @@ class Settings:
     sop_grounding: bool
     completeness_check: bool
     checker_model: str
+    build_budget_usd: float
 
     def to_dict(self) -> dict[str, Any]:
         """Loggable view: presence of secrets, never their values."""
@@ -56,6 +58,7 @@ class Settings:
             "sop_grounding": self.sop_grounding,
             "completeness_check": self.completeness_check,
             "checker_model": self.checker_model,
+            "build_budget_usd": self.build_budget_usd,
         }
 
 
@@ -132,4 +135,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         sop_grounding=_flag(env, "BLUEPRINT_SOP_GROUNDING", default=True),
         completeness_check=_flag(env, "BLUEPRINT_COMPLETENESS_CHECK", default=True),
         checker_model=env.get("BLUEPRINT_CHECKER_MODEL", "").strip() or DEFAULT_CHECKER_MODEL,
+        build_budget_usd=_float(
+            env, "BLUEPRINT_BUILD_BUDGET_USD", DEFAULT_BUILD_BUDGET_USD, minimum=0.1
+        ),
     )

@@ -24,3 +24,6 @@ logs/
 
 # eval run outputs (raw per-call results); summaries get written up, not committed
 evals/**/results/
+
+# model-generated prototypes (one folder per session); promote deliberately if worth keeping
+prototypes/

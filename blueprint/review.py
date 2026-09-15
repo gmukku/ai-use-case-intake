@@ -24,6 +24,7 @@ import jsonschema
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKError, Message, ResultMessage, query
 
 from blueprint.canvas import CanvasCategory
+from blueprint.isolation import AGENT_ENV
 from blueprint.skills import DepartmentSkill
 
 logger = logging.getLogger(__name__)
@@ -487,6 +488,7 @@ async def summarize_spec(
         model=model,
         system_prompt="You write short, plain titles and summaries for internal review queues.",
         setting_sources=[],
+        env=AGENT_ENV,
         tools=[],
         max_turns=3,
         effort="low",
