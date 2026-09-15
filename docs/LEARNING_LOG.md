@@ -37,8 +37,10 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-14 | 5 | HITL gate: compiled spec from the snapshot, rule-based risk with evidence per flag, append-only review log with validated decisions, send-back delivered through the SDK's `resume=` as a reviewer-framed instruction turn. CLI grew `review` and `resume`. Live round trip: send-back → resume → the agent asked for the intake system's product name → re-recorded as v2 → spec v2. | `a91b3af` |
 
-State at last update: 203 tests, ruff + mypy `--strict` clean, steps 1–5 of 13 complete plus
-hardening and web search. Next: step 6 (Builder subagent).
+| 2026-09-15 | 6 | Builder subagent: parent + `AgentDefinition` via the `Agent` tool, a `PreToolUse` hook as the entire permission policy (workspace jail, command allowlist, parent denied), Python-side verification, the first output-format template (Q&A stub). Live build: six files, 8 tests passed, two commands denied and adapted, $0.46. Found and closed an auto-memory leak into every agent. | `8fd0b1b` |
+
+State at last update: 240 tests, ruff + mypy `--strict` clean, steps 1–6 of 13 complete plus
+hardening and web search. Next: step 7 (FastAPI).
 
 ---
 
@@ -143,12 +145,40 @@ path was effectively unreachable. Reading the SDK source found it. *`orchestrato
 **What:** emitted when rate-limit status changes (`allowed_warning`, `rejected`). **Here:**
 logged at WARNING with utilization; not fatal.
 
-### Subagents (learned conceptually; not yet used)
-**What:** `AgentDefinition(description, prompt, tools, model)` under `options.agents`. The
-parent invokes it via the `Task` tool; it runs in a **fresh context to completion** and returns
-one result. **Consequence:** a subagent cannot hold a multi-turn conversation with a human,
-which is why discovery is the *main* session (Decision: Option A). Subagents are reserved for
-run-to-completion jobs: the Builder (step 6).
+### Subagents: `AgentDefinition` + the `Agent` tool
+**What:** `AgentDefinition(description, prompt, tools, model)` registered under
+`options.agents`; the parent invokes it through the `Agent` tool (the SDK docstring still says
+`Task`; `tools=["Task"]` is accepted), it runs in a fresh context to completion and returns
+one result. **Here:** the Builder. **Gotchas learned by probe:** (1) a subagent can only use
+tools the *session* carries, so the parent's `tools` must list Read/Write/Bash even though the
+parent must never use them; a hook denies the parent by `agent_type`. (2) `PreToolUse` hooks
+fire inside subagents with `agent_type` set. (3) `permission_mode="acceptEdits"` covers file
+edits only; Bash still prompts unless a hook returns `permissionDecision: "allow"`. (4) A
+subagent cannot converse with a human, which is why discovery is the main session.
+*`blueprint/builder.py`*
+
+### Permissions: a hook as the whole policy
+**What:** the SDK has three permission layers: `tools` (the universe), `permission_mode`
+(what is auto-approved), and per-call decisions via `can_use_tool` (interactive) or a
+`PreToolUse` hook (policy). **Here:** the hook is the policy. It *allows* vetted calls
+explicitly (so the CLI never prompts) and *denies* the rest with a reason the model reads:
+parent gets no file/shell tools; the builder is jailed to its workspace for reads and writes
+(reads too, or `.env` walks into context); Bash is one operator-free command from a short
+allowlist with no absolute paths outside the workspace. Every decision is recorded.
+`can_use_tool` is deliberately unused: it asks a human per call, the wrong shape for an
+autonomous job. **Verification is Python's, not the model's:** `pytest` in the workspace with
+secrets stripped from the environment, plus file, line, and banner checks.
+
+### Auto-memory is a third isolation channel
+**What:** Claude Code injects the developer's per-project memory into any session whose
+`cwd` maps to a known project, and a user-level index otherwise, regardless of
+`setting_sources`. **Found:** the Builder's report quoted this project's memory notes
+("standing standards on uv/ruff/mypy/event logs"). **Measured** with
+`ClaudeSDKClient.get_context_usage()["memoryFiles"]`: 1 file (170 tokens) by default, 0 with
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in the subprocess `env`. Every agent now passes it, and
+`tests/test_isolation.py` scans the package source so no `ClaudeAgentOptions` can omit it.
+The discovery agent had been carrying those notes silently since the memory files were
+created. *`blueprint/isolation.py`*
 
 ### Nested `query()` from inside a tool handler
 **What:** an in-process MCP tool handler runs inside the client's event loop while a session
@@ -303,6 +333,19 @@ Review happens hours after the conversation, so `compile_spec` and `assess_risk`
 audit store, and pure data in/out for tests. Every snapshot-carried type got a `from_dict`
 inverse; the snapshot is now the session's persistence format in all but name.
 
+### How small the prototype is, for the Q&A format
+README + 2–3 synthetic knowledge docs + `qa.py` (keyword retrieval, one model call, cited
+answer) + `test_qa.py` (retrieval only, no key). Max 8 files, ~450 lines, `anthropic` the only
+dependency, the prototype banner on every source file. Decided for this one format, as
+CLAUDE.md asked; other formats raise `UnsupportedOutputFormatError` rather than guess.
+
+### Output-format templates: files we load, not SDK-native skills
+The SDK discovers skills from `<cwd>/.claude/skills/`; the Builder's cwd is the prototype
+workspace, so SDK-native loading would mean copying the template into every workspace at
+build time. Contrived. The template is a `SKILL.md` under `builder_skills/`, parsed by the
+same frontmatter helper as department skills and placed in the subagent's prompt. The
+SDK-native path was considered and documented here; it never earned its complexity.
+
 ### Classifier model chosen by benchmark, not by default
 20 labeled cases × 3 repeats. Opus 95% exact / 0 unstable; Sonnet 91.7% / 1 unstable. Kept
 Opus because *stability* is the property that matters for a once-per-conversation decision
@@ -338,6 +381,9 @@ project rules were added. "It's configured" is not evidence.
 | Ran the real classifier from a unit test by accident (default `match_fn`). | Every external dependency needs an injection point with a fake default in the test helper. |
 | Typed the hook's return as `dict[str, Any]`; mypy rejected it against the SDK's `HookJSONOutput` union. | When an SDK publishes TypedDicts for a contract, use them: the type error is the documentation. |
 | Tests passed but took 22 s instead of 2 s: the fake client's real record tool called the real checker, which spawned real subprocesses that failed silently. | Test *duration* is a signal. Every new external call needs a fake default in the test helper before the first test run, not after. |
+| The Builder's report quoted my own memory notes; every agent since step 2 had been carrying them. | `setting_sources=[]` is not the whole isolation story. Measure what the subprocess actually loads (`get_context_usage`) instead of assuming; then enforce the fix structurally with a source-scanning test. |
+| Gave the verification subprocess an empty environment to keep secrets out; Python could not start on Windows. | Strip the secrets, inherit the rest. "Secure" and "works" are both requirements. |
+| POSIX-mode `shlex` stripped the backslashes from a Windows path, so an absolute path outside the workspace passed the guard. | Normalize separators before parsing; test the guard with real Windows paths, not just POSIX ones. |
 | Per-turn cost showed `$-0.1161` on the first resumed turn. The SDK's running total restarts in the new subprocess; the delta against the restored total went negative. | Read every number in a trace, not just the ones you are looking for. Cost across a process boundary needs an explicit offset. |
 | Shell heredoc patches mangled `
 ` escapes for the fourth time (CLI rewrite, orchestrator framing string). | Rule, finally applied: files containing escapes are written with the editor tool, never through a shell heredoc. |
