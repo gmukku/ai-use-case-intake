@@ -14,7 +14,7 @@ Safety properties live in code, not prose:
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final, Protocol
@@ -229,6 +229,15 @@ class SearchAttempt:
         """JSON-serializable view."""
         return {"query": self.query, "allowed": self.allowed, "at": self.at.isoformat()}
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> SearchAttempt:
+        """Inverse of :meth:`to_dict`."""
+        return cls(
+            query=str(data["query"]),
+            allowed=bool(data["allowed"]),
+            at=datetime.fromisoformat(data["at"]),
+        )
+
 
 @dataclass(slots=True)
 class WebSearchGuard:
@@ -281,3 +290,11 @@ class WebSearchGuard:
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable view for the session snapshot."""
         return {"max_calls": self.max_calls, "attempts": [a.to_dict() for a in self.attempts]}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> WebSearchGuard:
+        """Inverse of :meth:`to_dict`; the budget already used carries over."""
+        return cls(
+            max_calls=int(data["max_calls"]),
+            attempts=[SearchAttempt.from_dict(a) for a in data["attempts"]],
+        )

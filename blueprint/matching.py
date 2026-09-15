@@ -59,6 +59,18 @@ class DepartmentMatch:
             "matched_at": self.matched_at.isoformat(),
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> DepartmentMatch:
+        """Inverse of :meth:`to_dict`."""
+        return cls(
+            departments=tuple(data["departments"]),
+            rationale=str(data["rationale"]),
+            model=str(data["model"]),
+            cost_usd=data.get("cost_usd"),
+            duration_ms=int(data["duration_ms"]),
+            matched_at=datetime.fromisoformat(data["matched_at"]),
+        )
+
 
 def build_match_schema(skill_names: list[str]) -> dict[str, Any]:
     """JSON Schema for the classifier's output. The 1-3 rule and the allowed set live here."""

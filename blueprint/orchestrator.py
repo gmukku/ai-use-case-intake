@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, Final, Self
@@ -43,6 +43,7 @@ from blueprint.completeness import (
 )
 from blueprint.discovery import DEFAULT_MODEL, build_discovery_options
 from blueprint.matching import DepartmentMatch, MatchError, match_departments
+from blueprint.review import ReviewDecision, review_status
 from blueprint.skills import SKILLS_DIR, DepartmentSkill, load_skills
 from blueprint.websearch import DEFAULT_MAX_SEARCHES_PER_SESSION, SearchClient, WebSearchGuard
 
@@ -80,6 +81,8 @@ class TurnResult:
 
     turn: int
     user_text: str
+    origin: str
+    """``"stakeholder"`` or ``"reviewer"`` (a send-back note delivered to the model)."""
     assistant_text: str
     tool_calls: tuple[ToolCall, ...]
     captured: tuple[CanvasCategory, ...]
@@ -103,6 +106,7 @@ class TurnResult:
         return {
             "turn": self.turn,
             "user_text": self.user_text,
+            "origin": self.origin,
             "assistant_text": self.assistant_text,
             "tool_calls": [t.to_dict() for t in self.tool_calls],
             "captured": [c.value for c in self.captured],
@@ -239,6 +243,17 @@ def validate_user_text(text: str) -> str:
     return cleaned
 
 
+def frame_reviewer_note(note: str) -> str:
+    """Wrap a reviewer's send-back note as an instruction the model acts on, not a user turn."""
+    return (
+        "REVIEWER NOTE (from the internal reviewer, not from the stakeholder; the stakeholder "
+        f"cannot see this message): {note.strip()}\n\n"
+        "In your next message, ask the stakeholder about this in your own words. Do not mention "
+        "a reviewer or that anything was sent back. Once they answer, re-record the affected "
+        "category with the new detail."
+    )
+
+
 class DiscoverySession:
     """One stakeholder's discovery conversation, from first message to a complete canvas.
 
@@ -268,11 +283,21 @@ class DiscoverySession:
         checker_model: str = DEFAULT_CHECKER_MODEL,
         assess_fn: AssessFn = assess_capture,
         max_clarification_rounds: int = MAX_CLARIFICATION_ROUNDS,
+        snapshot: Mapping[str, Any] | None = None,
     ) -> None:
+        """Create a fresh session, or restore one from a ``to_dict`` snapshot.
+
+        With ``snapshot``, every log is rebuilt (canvas, verdicts, match, search budget,
+        reviews, turn count, cost) *before* the tools are built, and the SDK options carry
+        ``resume=<session_id>`` so the model reconnects to its own transcript. Restoration
+        must precede tool construction because the record tool closes over ``self.state``.
+        """
         self.state = CanvasState()
         self.turn = 0
         self.session_id: str | None = None
         self.total_cost_usd = 0.0
+        self._cost_offset = 0.0
+        """Cost spent in previous subprocesses of this session (set on restore)."""
         self.turns: list[TurnResult] = []
         self.idle_timeout_s = idle_timeout_s
         self.failure: str | None = None
@@ -287,10 +312,17 @@ class DiscoverySession:
         self._checker_model = checker_model
         self._assess_fn = assess_fn
         self._max_clarification_rounds = max_clarification_rounds
+        self.reviews: list[ReviewDecision] = []
+        """Append-only log of human decisions on this session's spec."""
         # The guard is owned here (not inside discovery.py) so its attempts are in the snapshot.
         self.web_search_guard = (
             WebSearchGuard(max_calls=max_web_searches) if web_search is not None else None
         )
+        self.resumed: bool = False
+
+        if snapshot is not None:
+            self._restore(snapshot)
+
         # The tools read turn number and matched skills through these lambdas at call time,
         # so a capture is attributed to the right turn and examples reflect the latest match.
         self.options = build_discovery_options(
@@ -304,8 +336,60 @@ class DiscoverySession:
             sop_grounding=sop_grounding,
             assess=self._assess if completeness_check else None,
         )
+        resume_id = str(snapshot.get("session_id") or "") if snapshot is not None else ""
+        if resume_id:
+            self.options = replace(self.options, resume=resume_id)
         self._client_factory = client_factory
         self._client: ClaudeSDKClient | None = None
+
+    def _restore(self, snapshot: Mapping[str, Any]) -> None:
+        """Rebuild every log from a snapshot. Turn results are not replayed; only their count."""
+        self.session_id = snapshot.get("session_id") or None
+        self.turn = int(snapshot.get("turn", 0))
+        self.total_cost_usd = float(snapshot.get("total_cost_usd", 0.0))
+        self._cost_offset = self.total_cost_usd
+        self.state = CanvasState.from_dict(snapshot["canvas"])
+        if snapshot.get("match"):
+            self.match = DepartmentMatch.from_dict(snapshot["match"])
+            self._match_attempts = 1
+        completeness = snapshot.get("completeness")
+        if completeness:
+            self.completeness = CompletenessTracker(
+                assessments=[Assessment.from_dict(a) for a in completeness["assessments"]],
+                rounds={CanvasCategory(k): int(v) for k, v in completeness["rounds"].items()},
+            )
+        if snapshot.get("web_search") and self.web_search_guard is not None:
+            self.web_search_guard = WebSearchGuard.from_dict(snapshot["web_search"])
+        self.reviews = [ReviewDecision.from_dict(d) for d in snapshot.get("reviews", [])]
+        self.resumed = True
+        logger.info(
+            "session.restored",
+            extra={
+                "session_id": self.session_id,
+                "turn": self.turn,
+                "entries": len(self.state.entries),
+                "reviews": len(self.reviews),
+            },
+        )
+
+    def record_review(self, decision: ReviewDecision) -> None:
+        """Append a human decision. The log is never edited."""
+        self.reviews.append(decision)
+        logger.info(
+            "review.decision",
+            extra={
+                "session_id": self.session_id,
+                "action": decision.action.value,
+                "reviewer": decision.reviewer,
+                "spec_version": decision.spec_version,
+                "risk_level": decision.risk_level.value,
+            },
+        )
+
+    @property
+    def review_status(self) -> str:
+        """``pending`` | ``approved`` | ``rejected`` | ``sent_back``, derived from the log."""
+        return review_status(self.reviews)
 
     async def _assess(self, entry: CanvasEntry, version: int) -> tuple[Assessment | None, bool]:
         """Run the completeness check for one capture; called from inside the record tool.
@@ -400,11 +484,26 @@ class DiscoverySession:
             SessionNotStartedError: if called outside ``start``/``close``.
             TurnProtocolError: if the SDK stream ends without a ``ResultMessage``.
         """
+        async for event in self._stream(user_text, origin="stakeholder"):
+            yield event
+
+    async def stream_reviewer_note(self, note: str) -> AsyncIterator[TurnEvent]:
+        """Deliver a reviewer's send-back note; the model turns it into a question.
+
+        The note is framed as an instruction the stakeholder cannot see, so the model asks
+        about it in its own voice. The trace records the raw note with ``origin="reviewer"``;
+        the requester view hides such turns, the admin view shows them.
+        """
+        async for event in self._stream(note, origin="reviewer"):
+            yield event
+
+    async def _stream(self, text: str, *, origin: str) -> AsyncIterator[TurnEvent]:
         if self._client is None:
             raise SessionNotStartedError(
                 f"session is not running ({self.failure or 'call start() first'})"
             )
-        user_text = validate_user_text(user_text)
+        user_text = validate_user_text(text)
+        model_text = frame_reviewer_note(user_text) if origin == "reviewer" else user_text
 
         # Increment BEFORE query() so tool calls made during this turn see the new number.
         self.turn += 1
@@ -412,7 +511,7 @@ class DiscoverySession:
         started_at = datetime.now(UTC)
         entries_before = len(self.state.entries)
         assessments_before = len(self.completeness.assessments)
-        logger.info("turn.start", extra={"turn": turn, "chars": len(user_text)})
+        logger.info("turn.start", extra={"turn": turn, "origin": origin, "chars": len(user_text)})
 
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
@@ -420,7 +519,7 @@ class DiscoverySession:
         failure: str | None = None
 
         try:
-            await self._client.query(user_text)
+            await self._client.query(model_text)
             messages = self._client.receive_response().__aiter__()
             while True:
                 # Idle timeout: "the SDK stopped talking to us", not a cap on the whole turn,
@@ -470,16 +569,19 @@ class DiscoverySession:
 
         if result is not None:
             self.session_id = result.session_id
-            # The SDK reports a RUNNING TOTAL per ResultMessage, not a per-turn cost.
+            # The SDK reports a RUNNING TOTAL per ResultMessage, not a per-turn cost, and that
+            # total restarts at zero in each new subprocess. After a resume, the cost spent in
+            # earlier processes is carried in ``_cost_offset`` so the session total keeps rising.
             turn_cost: float | None = None
+            session_cost: float | None = None
             if result.total_cost_usd is not None:
-                turn_cost = result.total_cost_usd - self.total_cost_usd
-                self.total_cost_usd = result.total_cost_usd
+                session_cost = self._cost_offset + result.total_cost_usd
+                turn_cost = session_cost - self.total_cost_usd
+                self.total_cost_usd = session_cost
             is_error = result.is_error
             errors: tuple[str, ...] = tuple(result.errors or ())
             duration_ms = result.duration_ms
             num_agentic_turns = result.num_turns
-            session_cost = result.total_cost_usd
         else:
             turn_cost = None
             is_error = True
@@ -493,6 +595,7 @@ class DiscoverySession:
         turn_result = TurnResult(
             turn=turn,
             user_text=user_text,
+            origin=origin,
             assistant_text="\n".join(p for p in text_parts if p.strip()).strip(),
             tool_calls=tuple(tool_calls),
             captured=captured,
@@ -576,16 +679,24 @@ class DiscoverySession:
         """The conversation so far as plain text, for the classifier."""
         lines = []
         for t in self.turns:
-            lines.append(f"you> {t.user_text}")
+            lines.append(f"{'reviewer' if t.origin == 'reviewer' else 'you'}> {t.user_text}")
             lines.append(f"assistant> {t.assistant_text}")
         return "\n".join(lines)
 
     async def send(self, user_text: str) -> TurnResult:
         """Non-streaming turn: drain ``stream`` and return the final ``TurnResult``."""
-        async for event in self.stream(user_text):
+        return await self._drain(self.stream(user_text))
+
+    async def send_reviewer_note(self, note: str) -> TurnResult:
+        """Non-streaming reviewer turn; see :meth:`stream_reviewer_note`."""
+        return await self._drain(self.stream_reviewer_note(note))
+
+    @staticmethod
+    async def _drain(events: AsyncIterator[TurnEvent]) -> TurnResult:
+        async for event in events:
             if isinstance(event, TurnCompleted):
                 return event.result
-        raise TurnProtocolError("stream() ended without a TurnCompleted event")  # unreachable
+        raise TurnProtocolError("stream ended without a TurnCompleted event")  # unreachable
 
     # -- derived state -------------------------------------------------------------------
 
@@ -624,6 +735,9 @@ class DiscoverySession:
             "is_ready_for_review": self.is_ready_for_review,
             "completeness": self.completeness.to_dict() if self._completeness_check else None,
             "open_gaps": {c.value: list(g) for c, g in self.completeness.gaps(self.state).items()},
+            "reviews": [d.to_dict() for d in self.reviews],
+            "review_status": self.review_status,
+            "resumed": self.resumed,
             "canvas": self.state.to_dict(),
             "turns": [t.to_dict() for t in self.turns],
         }

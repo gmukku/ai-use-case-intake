@@ -11,7 +11,7 @@ unit-tested exhaustively and reused by the audit layer and the eval harness.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -181,6 +181,16 @@ class CanvasEntry:
             "recorded_at": self.recorded_at.isoformat(),
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> CanvasEntry:
+        """Inverse of :meth:`to_dict`."""
+        return cls(
+            category=CanvasCategory(data["category"]),
+            summary=str(data["summary"]),
+            turn=int(data["turn"]),
+            recorded_at=datetime.fromisoformat(data["recorded_at"]),
+        )
+
 
 @dataclass(slots=True)
 class CanvasState:
@@ -239,6 +249,11 @@ class CanvasState:
     def __iter__(self) -> Iterator[CanvasEntry]:
         """Iterate the raw event log in insertion order."""
         return iter(self.entries)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> CanvasState:
+        """Rebuild the log from a ``to_dict`` snapshot (the derived fields are recomputed)."""
+        return cls(entries=[CanvasEntry.from_dict(e) for e in data["entries"]])
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serializable snapshot: the full log plus the derived current view."""

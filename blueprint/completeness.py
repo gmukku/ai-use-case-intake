@@ -13,7 +13,7 @@ cap in the orchestrator stops it from interrogating.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -70,6 +70,21 @@ class Assessment:
             "duration_ms": self.duration_ms,
             "assessed_at": self.assessed_at.isoformat(),
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Assessment:
+        """Inverse of :meth:`to_dict`."""
+        return cls(
+            category=CanvasCategory(data["category"]),
+            version=int(data["version"]),
+            satisfied=tuple(data["satisfied"]),
+            missing=tuple(data["missing"]),
+            question=data.get("question"),
+            model=str(data["model"]),
+            cost_usd=data.get("cost_usd"),
+            duration_ms=int(data["duration_ms"]),
+            assessed_at=datetime.fromisoformat(data["assessed_at"]),
+        )
 
 
 def build_assessment_schema(category: CanvasCategory) -> dict[str, Any]:

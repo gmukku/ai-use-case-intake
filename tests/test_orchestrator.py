@@ -35,6 +35,7 @@ from blueprint.orchestrator import (
     TurnProtocolError,
     validate_user_text,
 )
+from blueprint.review import ReviewAction, ReviewDecision, RiskLevel
 from blueprint.skills import SKILLS_DIR, load_skills
 
 SKILLS = load_skills(SKILLS_DIR)
@@ -697,6 +698,112 @@ class TestCompletenessLoop:
         assert session.is_ready_for_review
         assert session.to_dict()["completeness"] is None
         assert "Sufficient" not in created[0].tool_results[0]
+
+
+class TestRestoreAndReview:
+    async def _completed_session(self) -> tuple[DiscoverySession, list[FakeClient]]:
+        assessor = FakeAssessor({"value_proposition": [("measurable_impact",)] * 3})
+        all_seven: list[Step] = [
+            {"category": c.value, "summary": f"{c.value} ok"} for c in CanvasCategory
+        ]
+        session, created = make_session(
+            [[*all_seven, "recap"], ["ok"], ["ok"]],
+            FakeMatcher(("hr", "finance")),
+            assessor,
+            max_clarification_rounds=1,
+        )
+        async with session:
+            await session.send("everything at once")
+            await session.send("one")
+            await session.send("two")
+        return session, created
+
+    async def test_restore_rebuilds_every_log_and_sets_resume(self) -> None:
+        original, _ = await self._completed_session()
+        original.record_review(
+            ReviewDecision(ReviewAction.SEND_BACK, "goutam", "Which HRIS?", 1, RiskLevel.ELEVATED)
+        )
+        snap = original.to_dict()
+        assert snap["review_status"] == "sent_back" and snap["resumed"] is False
+
+        def factory(opts: ClaudeAgentOptions) -> Any:
+            return FakeClient(opts, [["Which HRIS do you use?"]])
+
+        restored = DiscoverySession(
+            client_factory=factory,
+            skills=SKILLS,
+            match_fn=FakeMatcher(),
+            assess_fn=FakeAssessor(),
+            snapshot=snap,
+        )
+        assert restored.resumed and restored.options.resume == "sess-1"
+        assert restored.session_id == "sess-1" and restored.turn == 3
+        assert restored.total_cost_usd == pytest.approx(0.03)
+        assert restored.state.to_dict()["current"] == snap["canvas"]["current"]
+        assert len(restored.completeness.assessments) == len(snap["completeness"]["assessments"])
+        assert restored.completeness.rounds == {CanvasCategory.VALUE_PROPOSITION: 1}
+        assert restored.match is not None and restored.match.departments == ("hr", "finance")
+        assert [s.name for s in restored.matched_skills()] == ["hr", "finance"]
+        assert restored.review_status == "sent_back"
+        assert restored.reviews[0].note == "Which HRIS?"
+        # Derived views survive too.
+        assert restored.is_complete
+        assert restored.to_dict()["open_gaps"] == snap["open_gaps"]
+
+    async def test_cost_keeps_rising_across_a_resume(self) -> None:
+        # The SDK's running total restarts at zero in the new subprocess; the restored session
+        # must carry the earlier spend as an offset, never report a negative turn.
+        original, _ = await self._completed_session()
+        assert original.total_cost_usd == pytest.approx(0.03)
+        snap = original.to_dict()
+
+        def factory(opts: ClaudeAgentOptions) -> Any:
+            return FakeClient(opts, [["ok"], ["ok"]])  # fresh fake: running total starts at 0
+
+        restored = DiscoverySession(
+            client_factory=factory,
+            skills=SKILLS,
+            match_fn=FakeMatcher(),
+            assess_fn=FakeAssessor(),
+            snapshot=snap,
+        )
+        async with restored:
+            first = await restored.send("a")
+            second = await restored.send("b")
+        assert first.cost_usd == pytest.approx(0.01)
+        assert first.session_cost_usd == pytest.approx(0.04)
+        assert second.cost_usd == pytest.approx(0.01)
+        assert restored.total_cost_usd == pytest.approx(0.05)
+
+    async def test_reviewer_note_is_framed_for_the_model_and_raw_in_the_trace(self) -> None:
+        session, created = make_session([["Which HRIS do you use?"]])
+        async with session:
+            result = await session.send_reviewer_note("The spec lacks the HRIS name.")
+
+        sent = created[0].queries[0]
+        assert sent.startswith("REVIEWER NOTE (from the internal reviewer")
+        assert "The spec lacks the HRIS name." in sent
+        assert "Do not mention a reviewer" in sent
+        assert result.origin == "reviewer"
+        assert result.user_text == "The spec lacks the HRIS name."  # raw, not framed
+        assert result.turn == 1
+        assert "reviewer> The spec lacks the HRIS name." in session.render_transcript()
+        assert session.to_dict()["turns"][0]["origin"] == "reviewer"
+
+    async def test_stakeholder_turns_have_stakeholder_origin(self) -> None:
+        session, _ = make_session([["hi"]])
+        async with session:
+            result = await session.send("hello")
+        assert result.origin == "stakeholder"
+        assert "you> hello" in session.render_transcript()
+
+    async def test_review_log_is_append_only_and_in_snapshot(self) -> None:
+        session, _ = make_session([])
+        session.record_review(ReviewDecision(ReviewAction.REJECT, "goutam", "no", 1, RiskLevel.LOW))
+        session.record_review(ReviewDecision(ReviewAction.APPROVE, "goutam", "", 2, RiskLevel.LOW))
+        snap = session.to_dict()
+        assert [d["action"] for d in snap["reviews"]] == ["reject", "approve"]
+        assert snap["review_status"] == "approved"
 
 
 class TestSnapshot:
