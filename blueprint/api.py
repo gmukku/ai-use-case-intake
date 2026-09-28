@@ -35,6 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from blueprint import eval_runs
 from blueprint.builder import (
     PROTOTYPES_DIR,
     BuildResult,
@@ -158,6 +159,25 @@ class QueueItem(BaseModel):
     turns: int
     ready_for_review: bool
     live: bool
+
+
+class AdminSession(BaseModel):
+    """One row of the admin's session list. Unlike the review queue, nothing is filtered out."""
+
+    session_id: str
+    live: bool
+    turn: int
+    is_complete: bool
+    ready_for_review: bool
+    review_status: str
+    build_status: str
+    departments: list[str]
+    open_gaps: dict[str, list[str]]
+    total_cost_usd: float
+    model: str | None
+    failure: str | None
+    feedback: dict[int, str]
+    resumed: bool
 
 
 class BuildStatus(BaseModel):
@@ -651,6 +671,57 @@ def create_app(
         return {"review_status": snap["review_status"], "spec_version": spec.version}
 
     # -- admin surface --------------------------------------------------------------------
+
+    @app.get("/admin/sessions", response_model=list[AdminSession], dependencies=[admin])
+    async def admin_sessions() -> list[AdminSession]:
+        """Every session, complete or not. The review queue hides the unfinished ones."""
+        rows: list[AdminSession] = []
+        seen: set[str] = set()
+        for sid in [*registry.ids, *run_store.ids()]:
+            if sid in seen:
+                continue
+            seen.add(sid)
+            snap = _snapshot(sid)
+            entries = [RequesterFeedback.from_dict(f) for f in snap.get("feedback", [])]
+            rows.append(
+                AdminSession(
+                    session_id=sid,
+                    live=registry.get(sid) is not None,
+                    turn=int(snap.get("turn", 0)),
+                    is_complete=bool(snap.get("is_complete")),
+                    ready_for_review=bool(snap.get("is_ready_for_review")),
+                    review_status=str(snap.get("review_status", "pending")),
+                    build_status=_build_status(sid, snap).status,
+                    departments=list((snap.get("match") or {}).get("departments", [])),
+                    open_gaps={k: list(v) for k, v in (snap.get("open_gaps") or {}).items()},
+                    total_cost_usd=float(snap.get("total_cost_usd", 0.0)),
+                    model=snap.get("model"),
+                    failure=snap.get("failure"),
+                    feedback={t: f.rating.value for t, f in current_feedback(entries).items()},
+                    resumed=bool(snap.get("resumed")),
+                )
+            )
+        return rows
+
+    @app.get("/admin/evals", dependencies=[admin])
+    async def admin_evals() -> dict[str, Any]:
+        """Recorded eval runs, grouped by suite, newest first."""
+        return {
+            "suites": [
+                {"suite": suite, "runs": [r.to_dict() for r in eval_runs.runs(suite)]}
+                for suite in eval_runs.suites()
+            ]
+        }
+
+    @app.get("/admin/evals/{suite}/{run_id}", dependencies=[admin])
+    async def admin_eval_run(suite: str, run_id: str) -> dict[str, Any]:
+        """One eval run in full, including every per-call result."""
+        try:
+            return eval_runs.load(suite, run_id)
+        except eval_runs.EvalNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "no such eval run") from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
     @app.get("/admin/sessions/{session_id}/trace", dependencies=[admin])
     async def trace(session_id: str) -> dict[str, Any]:

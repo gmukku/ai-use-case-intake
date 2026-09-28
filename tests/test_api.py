@@ -3,11 +3,13 @@ import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
 from claude_agent_sdk import ClaudeAgentOptions
 
+from blueprint import eval_runs
 from blueprint.api import create_app
 from blueprint.builder import BuildResult, Verification
 from blueprint.canvas import CanvasCategory
@@ -713,3 +715,72 @@ class TestFeedback:
             )
         assert response.status_code == 422
         assert "has not happened" in response.json()["detail"]
+
+
+class TestAdminSessions:
+    async def test_lists_incomplete_sessions_too(self, harness: Harness) -> None:
+        # The review queue deliberately hides these; the admin view is where they show up.
+        async with harness.client() as client:
+            started = await start_session(client)
+            response = await client.get("/admin/sessions")
+        rows = response.json()
+        assert [r["session_id"] for r in rows] == [started]
+        assert rows[0]["is_complete"] is False and rows[0]["turn"] == 0
+        assert rows[0]["live"] is True
+
+    async def test_carries_the_technical_detail_the_requester_never_sees(
+        self, harness: Harness
+    ) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.post(f"/sessions/{session_id}/feedback", json={"turn": 1, "rating": "up"})
+            response = await client.get("/admin/sessions")
+        row = next(r for r in response.json() if r["session_id"] == session_id)
+        assert row["departments"] == ["hr"]
+        assert row["feedback"] == {"1": "up"}
+        assert row["review_status"] == "pending"
+        assert row["build_status"] == "none"
+        assert row["total_cost_usd"] > 0
+        assert row["failure"] is None
+
+    async def test_needs_the_admin_token(self) -> None:
+        harness = make_harness(admin_token="s3cret")
+        async with harness.client() as client:
+            assert (await client.get("/admin/sessions")).status_code == 401
+            ok = await client.get("/admin/sessions", headers={"Authorization": "Bearer s3cret"})
+        assert ok.status_code == 200
+
+
+class TestAdminEvals:
+    async def test_lists_suites_and_runs(self, harness: Harness, tmp_path: Path) -> None:
+        suite = tmp_path / "skill_matching" / "results"
+        suite.mkdir(parents=True)
+        (tmp_path / "skill_matching" / "run.py").write_text("#", encoding="utf-8")
+        (suite / "20260914T015734Z.json").write_text(
+            json.dumps({"summary": {"opus": {"exact_match": 0.95}}, "results": [{"case_id": "c"}]}),
+            encoding="utf-8",
+        )
+        with patch.object(eval_runs, "EVALS_DIR", tmp_path):
+            async with harness.client() as client:
+                listed = await client.get("/admin/evals")
+                one = await client.get("/admin/evals/skill_matching/20260914T015734Z")
+
+        body = listed.json()["suites"]
+        assert body[0]["suite"] == "skill_matching"
+        assert body[0]["runs"][0]["summary"]["opus"]["exact_match"] == 0.95
+        assert body[0]["runs"][0]["calls"] == 1
+        assert one.json()["results"][0]["case_id"] == "c"  # full file, per-call results included
+
+    async def test_missing_run_is_404(self, harness: Harness, tmp_path: Path) -> None:
+        with patch.object(eval_runs, "EVALS_DIR", tmp_path):
+            async with harness.client() as client:
+                response = await client.get("/admin/evals/skill_matching/nope")
+        assert response.status_code == 404
+
+    async def test_a_traversal_attempt_is_400_not_a_file_read(
+        self, harness: Harness, tmp_path: Path
+    ) -> None:
+        with patch.object(eval_runs, "EVALS_DIR", tmp_path):
+            async with harness.client() as client:
+                response = await client.get("/admin/evals/skill_matching/..%2F..%2Fsecret")
+        assert response.status_code in (400, 404)
