@@ -41,9 +41,12 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-28 | 7 | FastAPI over the whole pipeline: three route groups for the three audiences, SSE for the requester's turn, a `RunStore` behind an interface, one-turn-at-a-time session locking, an idle sweeper, bearer token on reviewer/admin, builds as background tasks. Live: a real turn streamed end to end, snapshot persisted under the API's own uuid, queue picking up earlier CLI runs from the same `runs/`. | `7f844f6` |
 
-State at last update: 293 tests, ruff + mypy `--strict` clean, steps 1–7 of 13 complete plus
-hardening and web search. The backend is feature-complete; next is step 8 (Next.js + the
-requester view), which is also where the React learning starts.
+| 2026-09-28 | 8a | Next.js 16 scaffold and the requester's conversation view: a typed API client that reads the SSE stream by hand, streaming text with a caret, lazy session creation. Live: two turns streamed into the browser. | `9bcba59` |
+| 2026-09-28 | 8b | `/s/<id>` routing with an in-place URL rewrite, transcript restored from the server, reopen after a send-back, and 👍/👎 feedback (new `blueprint/feedback.py`, two new endpoints). Live: the whole send-back → reopen → answer → re-record loop through the browser. Three bugs found by running it that neither the tests nor the typechecker could see. | `9f50425` |
+
+State at last update: 321 tests, ruff + mypy `--strict` clean, steps 1–8 of 13 complete plus
+hardening and web search. Next: step 9 (reviewer view), which is where the admin token has to
+stop being something the browser could ever hold.
 
 ---
 
@@ -404,6 +407,59 @@ subprocess, no network and no disk — the same pattern as the orchestrator's `c
 now one layer up. Thirty-two tests in 1.7 s is what makes it cheap to keep them honest.
 *`tests/test_api.py`*
 
+### React state is replaced, never mutated — the canvas discipline again
+`setMessages([...messages, m])` works; `messages.push(m)` renders nothing. React decides what
+changed by comparing identity, so a new array *is* the signal. Same habit as the frozen
+dataclasses on the Python side, for the same underlying reason. **The streaming corollary:**
+inside a `for await` loop, `setReply(reply + chunk)` reads a `reply` captured when the loop
+started and overwrites itself on every chunk. The functional form,
+`setReply((prev) => prev + chunk)`, asks React for the current value.
+*`frontend/app/components/Conversation.tsx`*
+
+### `useRef` for what must survive a render without causing one
+The session id has to persist across renders and nothing on screen depends on it, so it is a
+ref. In state it would repaint the whole conversation every turn for nothing. Refs are also
+the escape hatch for real DOM work: measuring `scrollHeight` to grow the textarea has no state
+equivalent. *`Composer.tsx` `resize`, `Conversation.tsx` `sessionId`*
+
+### Reading SSE by hand, because `EventSource` is GET-only
+The browser's native SSE client cannot send a request body. Moving the stakeholder's message
+into a query string would have made it fit, and would have put their words in every URL, log
+and referrer on the way — so it was never really an option. `fetch` plus
+`response.body.getReader()` is about forty lines. **The part worth remembering:** SSE frame
+boundaries and network chunk boundaries have nothing to do with each other, so one
+`event:`/`data:` pair can arrive split down the middle. Everything after the last blank line
+stays buffered until its terminator shows up. *`frontend/lib/api.ts` `streamTurn`*
+
+### The wire format stops at the client module
+`streamTurn` yields the same four event types the Python orchestrator yields: `text`,
+`activity`, `done`, `error`. No component knows SSE exists, and an unrecognised event name is
+skipped rather than treated as a failure, so the backend can add one without breaking a
+deployed frontend. Same reason `_translate_stream_event` exists on the Python side — two
+translation layers, each stopping a wire format from leaking into the thing above it.
+
+### Derived state beats a flag someone has to clear
+Whether to offer "a reviewer has a question" is not `review_status == "sent_back"`; that stays
+true after the question has been asked. It is `send-backs recorded > turns with
+origin="reviewer"`, computed from the snapshot on every request. Nothing to set, nothing to
+forget to unset, and correct after a reload, a restart, or a second send-back. The canvas's
+`covered`/`missing` and `review_status` itself are the same idea — this one was only easier to
+get wrong because the tempting field was sitting right there. *`blueprint/api.py`
+`_pending_note`*
+
+### The snapshot is the audit trail, so a partial restore must not narrow it
+A restored session has no live `TurnResult` for work another process did. That is fine for
+running and was silently fatal for saving, because `to_dict()` then emitted only this
+process's turns. Prior turns are now carried forward verbatim, as the dicts they were written
+as. General rule: when an object can be rebuilt from a snapshot, check what its *serializer*
+does with the parts that were not rebuilt. *`blueprint/orchestrator.py` `_restore`, `to_dict`*
+
+### Two humans, two logs
+`review.py` holds the reviewer's decisions, `feedback.py` the requester's ratings. Both
+append-only, neither collapsing history — a rating that changed is information, so `current`
+is a view over the log rather than a replacement for it. Keeping them separate means the
+reviewer surface and the requester surface never have to filter each other's data out.
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -436,12 +492,22 @@ project rules were added. "It's configured" is not evidence.
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 | The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| Resuming a session wiped its transcript: `_restore` does not replay turn results, so the next `to_dict()` wrote one turn over ten. Present in the CLI's resume since step 5, found only by reloading a resumed conversation in a browser and seeing nine messages gone. | A partial restore is a decision about the *object*, and silently also a decision about everything that object serializes. The round-trip tests asserted the canvas and the counters survived. Nothing asserted the transcript did. |
+| Offered "a reviewer has a question" forever, because `review_status` stays `sent_back` after the question is asked — and a reload would have put the same question to the requester twice. | The field that names a state is not always the field that answers "is there work left". Derive that from what actually happened, not from the nearest enum. |
+| Then fixed it by swapping the new predicate in everywhere the old one appeared, which disabled the composer and locked the requester out of answering. | One rename, two meanings. When a boolean starts answering a second question, that is a second boolean. |
+| Chased a blank screenshot through two "fixes" to `scrollIntoView` before measuring anything. The blankness was a capture artifact; the real bug was beside it, a sticky composer floating over the last element on the page and hiding the reopen button completely. | Measure first. One `getBoundingClientRect()` on the two elements answered what two guesses had not. The scroll changes were kept because they are right for other reasons, which is not the same as having been diagnosed. |
+| Ran uvicorn with `--reload` to save restarts; every session create then failed with an empty `CLIConnectionError`. The reloader runs the app in a `multiprocessing` spawn child and the SDK could not start its CLI from there. | An empty error message is still evidence — it placed the failure in spawning rather than in our code, and the surviving process's command line named the cause outright. Convenience flags change the process tree, which matters when the app's whole job is spawning processes. |
 | `POST /builds` guarded with "is a build running?", which read as idempotent and was not: between two requests the first build finished, so the second started a fresh one and overwrote a ~$0.46 workspace. | The test I wrote to confirm the guard is what disproved it — the assertion I expected to be trivial (`len(build_calls) == 1`) was the one that failed. State that changes on its own needs the *finished* case handled explicitly, not just the in-flight one. |
 
 ---
 
 ## Deferred and open
 
+- **The requester view has no tests.** The backend it talks to has 321; the React has a
+  typechecker and a linter. Every bug in step 8 was found by clicking. Playwright against the
+  real API would have caught the sticky-composer overlap and the locked-out composer.
+- **One run's transcript was lost** (`32ddecd8`) to the resume bug before it was found. Left as
+  it is rather than reconstructed — the damage is the evidence.
 - **Bedrock auth path**: `.env.example` documents it; still not exercised. Step 7 came and went
   on the API-key path. Worth proving before the README claims both work.
 - **The session registry is in-process**, so the API runs as exactly one worker today. More than
