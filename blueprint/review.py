@@ -416,8 +416,17 @@ def compile_spec(
     open_gaps: dict[str, list[str]] = {k: list(v) for k, v in snapshot.get("open_gaps", {}).items()}
     risk = assess_risk(current, open_gaps=open_gaps, web_searches=len(web_queries), skills=skills)
 
-    # Fallbacks when no model-written title/narrative was supplied.
-    first_user = next((t["user_text"] for t in snapshot.get("turns", [])), "")
+    # Fallbacks when no model-written title/narrative was supplied. A reviewer's send-back
+    # note is the `user_text` of its turn, so the origin filter matters: without it a spec
+    # whose first surviving turn is a send-back gets titled with the reviewer's own words.
+    first_user = next(
+        (
+            t["user_text"]
+            for t in snapshot.get("turns", [])
+            if t.get("origin") != "reviewer" and t.get("user_text")
+        ),
+        "",
+    )
     last_assistant = next(
         (t["assistant_text"] for t in reversed(snapshot.get("turns", [])) if t["assistant_text"]),
         "",

@@ -293,3 +293,46 @@ class TestDecisions:
             review_status([ReviewDecision(ReviewAction.REJECT, "g", "no", 1, RiskLevel.LOW)])
             == "rejected"
         )
+
+
+class TestTitleFallbackIgnoresTheReviewer:
+    """A send-back note is a turn's user_text, and it is not the requester speaking."""
+
+    def test_a_reviewer_turn_is_never_the_title(self) -> None:
+        snap = snapshot()
+        snap["turns"].insert(
+            0,
+            {
+                "turn": 1,
+                "origin": "reviewer",
+                "user_text": "Which HRIS is the packet data actually going into?",
+                "assistant_text": "One more thing about your systems.",
+                "tool_calls": [],
+            },
+        )
+        spec = compile_spec(snap, SKILLS)
+        assert spec.title == "I run onboarding and the paperwork is a mess"
+        assert "Which HRIS" not in spec.title
+
+    def test_falls_back_cleanly_when_only_a_reviewer_turn_survives(self) -> None:
+        snap = snapshot()
+        snap["turns"] = [
+            {
+                "turn": 11,
+                "origin": "reviewer",
+                "user_text": "Which HRIS exactly?",
+                "assistant_text": "Which system is it?",
+                "tool_calls": [],
+            }
+        ]
+        spec = compile_spec(snap, SKILLS)
+        assert spec.title == ""  # empty beats quoting the reviewer back at themselves
+        assert spec.narrative == "Which system is it?"  # the agent's own voice is fine
+
+    def test_a_turn_with_no_user_text_is_skipped(self) -> None:
+        snap = snapshot()
+        snap["turns"].insert(
+            0, {"turn": 0, "user_text": "", "assistant_text": "", "tool_calls": []}
+        )
+        spec = compile_spec(snap, SKILLS)
+        assert spec.title == "I run onboarding and the paperwork is a mess"
