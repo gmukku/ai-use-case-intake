@@ -222,6 +222,7 @@ def make_session(
     *,
     completeness_check: bool = True,
     max_clarification_rounds: int = MAX_CLARIFICATION_ROUNDS,
+    snapshot: dict[str, Any] | None = None,
 ) -> tuple[DiscoverySession, list[FakeClient]]:
     created: list[FakeClient] = []
 
@@ -237,6 +238,7 @@ def make_session(
         assess_fn=assessor or FakeAssessor(),
         completeness_check=completeness_check,
         max_clarification_rounds=max_clarification_rounds,
+        snapshot=snapshot,
     )
     return session, created
 
@@ -883,3 +885,49 @@ class TestSessionIdentity:
         assert session.session_id == pinned
         assert session.to_dict()["session_id"] == pinned
         assert "session.id_mismatch" in caplog.text
+
+
+class TestSnapshotIsAnAuditTrail:
+    """A resumed session must not overwrite the record of what happened before it."""
+
+    async def test_restoring_then_saving_keeps_the_earlier_turns(self) -> None:
+        first, _ = make_session([[{"category": "key_stakeholders", "summary": "HR ops"}, "Go on?"]])
+        async with first:
+            await first.send("we handle onboarding")
+        snapshot = first.to_dict()
+        assert len(snapshot["turns"]) == 1
+
+        second, _ = make_session([["And which system is that?"]], snapshot=snapshot)
+        async with second:
+            await second.send("BambooHR")
+        after = second.to_dict()
+
+        assert after["turn"] == 2
+        assert len(after["turns"]) == 2, "the restored turn was dropped from the snapshot"
+        assert after["turns"][0]["user_text"] == "we handle onboarding"
+        assert after["turns"][1]["user_text"] == "BambooHR"
+
+    async def test_prior_turns_are_carried_verbatim(self) -> None:
+        first, _ = make_session([[{"category": "output_format", "summary": "chatbot"}, "Noted."]])
+        async with first:
+            await first.send("a chatbot please")
+        original = first.to_dict()["turns"][0]
+
+        second, _ = make_session([["Anything else?"]], snapshot=first.to_dict())
+        async with second:
+            await second.send("no")
+        assert second.to_dict()["turns"][0] == original
+
+    async def test_a_restore_chain_does_not_lose_the_middle(self) -> None:
+        session, _ = make_session([["one"]])
+        async with session:
+            await session.send("first")
+        snapshot = session.to_dict()
+
+        for text, reply in [("second", "two"), ("third", "three")]:
+            nxt, _ = make_session([[reply]], snapshot=snapshot)
+            async with nxt:
+                await nxt.send(text)
+            snapshot = nxt.to_dict()
+
+        assert [t["user_text"] for t in snapshot["turns"]] == ["first", "second", "third"]

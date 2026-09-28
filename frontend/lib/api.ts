@@ -26,7 +26,25 @@ export type SessionStatus = {
   ready_for_review: boolean;
   review_status: ReviewStatus;
   build_status: BuildState;
+  /** A reviewer's question is waiting and has not been asked yet. */
+  can_reopen: boolean;
   outcome: string | null;
+};
+
+export type Rating = "up" | "down";
+
+/** One side of one turn, as the requester saw it. */
+export type Utterance = {
+  turn: number;
+  role: "you" | "agent";
+  text: string;
+};
+
+/** The conversation, for restoring it after a reload. */
+export type Transcript = {
+  messages: Utterance[];
+  /** Latest rating per turn, keyed by turn number as a string (JSON has no integer keys). */
+  feedback: Record<string, Rating>;
 };
 
 /** One thing that happened during a turn. Mirrors `blueprint.orchestrator`'s events. */
@@ -91,6 +109,25 @@ export async function createSession(): Promise<string> {
 export async function getStatus(sessionId: string): Promise<SessionStatus> {
   const response = await request(`/sessions/${sessionId}`);
   return response.json();
+}
+
+/** The conversation so far, so a reload or a shared link can pick it up where it left off. */
+export async function getTranscript(sessionId: string): Promise<Transcript> {
+  const response = await request(`/sessions/${sessionId}/messages`);
+  return response.json();
+}
+
+/** Rate one agent turn. Append-only on the server; sending again simply supersedes. */
+export async function rateTurn(
+  sessionId: string,
+  turn: number,
+  rating: Rating,
+  comment = "",
+): Promise<void> {
+  await request(`/sessions/${sessionId}/feedback`, {
+    method: "POST",
+    body: JSON.stringify({ turn, rating, comment }),
+  });
 }
 
 export function sendMessage(sessionId: string, text: string): AsyncGenerator<TurnEvent> {

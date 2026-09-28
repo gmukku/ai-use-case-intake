@@ -42,6 +42,8 @@ from blueprint.builder import (
     build_prototype,
     select_template,
 )
+from blueprint.feedback import MAX_COMMENT_CHARS, Rating, RequesterFeedback
+from blueprint.feedback import current as current_feedback
 from blueprint.observability import configure_logging
 from blueprint.orchestrator import (
     MAX_USER_TEXT_CHARS,
@@ -101,10 +103,40 @@ class SessionStatus(BaseModel):
     ready_for_review: bool
     review_status: Literal["pending", "approved", "rejected", "sent_back"]
     build_status: Literal["none", "running", "ok", "failed"]
+    can_reopen: bool = Field(
+        default=False,
+        description="A reviewer's question is waiting and has not been asked yet.",
+    )
     outcome: str | None = Field(
         default=None,
         description="Plain-language note for the requester once there is an outcome.",
     )
+
+
+class Utterance(BaseModel):
+    """One side of one turn, as the requester saw it."""
+
+    turn: int
+    role: Literal["you", "agent"]
+    text: str
+
+
+class Transcript(BaseModel):
+    """The conversation, for restoring it after a reload. Requester-safe by construction."""
+
+    messages: list[Utterance]
+    feedback: dict[int, str] = Field(
+        default_factory=dict,
+        description="Latest rating per turn, so the UI can show which turns were rated.",
+    )
+
+
+class FeedbackIn(BaseModel):
+    """A requester's rating of one agent turn."""
+
+    turn: int = Field(ge=1)
+    rating: Rating
+    comment: str = Field(default="", max_length=MAX_COMMENT_CHARS)
 
 
 class DecisionIn(BaseModel):
@@ -307,9 +339,24 @@ def create_app(
             )
         return BuildStatus(session_id=session_id, status="none")
 
+    def _pending_note(snapshot: dict[str, Any]) -> str | None:
+        """The reviewer's question, if one is still waiting to be asked.
+
+        A send-back is "delivered" once a turn with ``origin == "reviewer"`` has run for it.
+        Comparing counts rather than setting a flag keeps this derivable from the snapshot
+        alone, so a reload cannot deliver the same question to the requester twice.
+        """
+        reviews = snapshot.get("reviews", [])
+        if not reviews or reviews[-1].get("action") != ReviewAction.SEND_BACK.value:
+            return None
+        sent_back = sum(1 for r in reviews if r.get("action") == ReviewAction.SEND_BACK.value)
+        delivered = sum(1 for t in snapshot.get("turns", []) if t.get("origin") == "reviewer")
+        return str(reviews[-1].get("note", "")) if delivered < sent_back else None
+
     def _status(session_id: str, snapshot: dict[str, Any]) -> SessionStatus:
         rstatus = snapshot.get("review_status", "pending")
         build = _build_status(session_id, snapshot)
+        can_reopen = _pending_note(snapshot) is not None
         outcome: str | None = None
         if build.status == "ok":
             outcome = "A small illustrative prototype is ready for you to try."
@@ -317,8 +364,10 @@ def create_app(
             outcome = "Your request was approved and a prototype is being prepared."
         elif rstatus == "rejected":
             outcome = "A reviewer decided not to proceed with this request."
-        elif rstatus == "sent_back":
+        elif can_reopen:
             outcome = "A reviewer has a follow-up question; reopen the conversation to answer it."
+        elif rstatus == "sent_back":
+            outcome = None  # the question has been asked; the conversation is simply open again
         elif snapshot.get("is_ready_for_review"):
             outcome = "Thanks, a reviewer will look at this before anything is built."
         return SessionStatus(
@@ -329,6 +378,7 @@ def create_app(
             ready_for_review=bool(snapshot.get("is_ready_for_review")),
             review_status=rstatus,
             build_status=build.status,
+            can_reopen=can_reopen,
             outcome=outcome,
         )
 
@@ -412,8 +462,8 @@ def create_app(
         session_id = _sid(session_id)
         live = await _open(session_id)
         session = live.session
-        pending = [d for d in session.reviews if d.action is ReviewAction.SEND_BACK][-1:]
-        if session.review_status != "sent_back" or not pending:
+        note = _pending_note(session.to_dict())
+        if note is None:
             # Nothing to deliver: the session is simply reopened. Answer in the same SSE
             # vocabulary so the client has one code path for both cases.
             async def nothing() -> AsyncIterator[str]:
@@ -432,7 +482,7 @@ def create_app(
             raise HTTPException(status.HTTP_409_CONFLICT, "a turn is already in progress")
         await live.lock.acquire()
         return StreamingResponse(
-            _stream_turn(session_id, live, session.stream_reviewer_note(pending[0].note)),
+            _stream_turn(session_id, live, session.stream_reviewer_note(note)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -441,6 +491,55 @@ def create_app(
     async def get_session(session_id: str) -> SessionStatus:
         session_id = _sid(session_id)
         return _status(session_id, _snapshot(session_id))
+
+    @app.get("/sessions/{session_id}/messages", response_model=Transcript)
+    async def transcript(session_id: str) -> Transcript:
+        """The conversation as the requester saw it, for restoring the page after a reload."""
+        session_id = _sid(session_id)
+        snap = _snapshot(session_id)
+        messages: list[Utterance] = []
+        for turn in snap.get("turns", []):
+            number = int(turn.get("turn", 0))
+            # A reviewer's send-back note is the `user_text` of its turn, and the requester
+            # never saw it. The agent's reply to it is safe: the model is instructed to ask
+            # in its own voice without mentioning that anything was sent back.
+            if turn.get("origin") != "reviewer" and turn.get("user_text"):
+                messages.append(Utterance(turn=number, role="you", text=str(turn["user_text"])))
+            if turn.get("assistant_text"):
+                messages.append(
+                    Utterance(turn=number, role="agent", text=str(turn["assistant_text"]))
+                )
+        entries = [RequesterFeedback.from_dict(f) for f in snap.get("feedback", [])]
+        return Transcript(
+            messages=messages,
+            feedback={t: f.rating.value for t, f in current_feedback(entries).items()},
+        )
+
+    @app.post("/sessions/{session_id}/feedback", status_code=status.HTTP_204_NO_CONTENT)
+    async def rate_turn(session_id: str, body: FeedbackIn) -> None:
+        """Record what the requester thought of one agent turn. Append-only; last one wins."""
+        session_id = _sid(session_id)
+        entry = RequesterFeedback(turn=body.turn, rating=body.rating, comment=body.comment)
+        live = registry.get(session_id)
+        if live is not None:
+            try:
+                live.session.record_feedback(entry)
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+            _persist(live.session)
+            live.touch()
+        else:
+            snap = _snapshot(session_id)
+            if entry.turn > int(snap.get("turn", 0)):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY, f"turn {entry.turn} has not happened"
+                )
+            snap.setdefault("feedback", []).append(entry.to_dict())
+            run_store.save(snap)
+        logger.info(
+            "api.feedback",
+            extra={"session_id": session_id, "turn": entry.turn, "rating": entry.rating.value},
+        )
 
     @app.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def close_session(session_id: str) -> None:

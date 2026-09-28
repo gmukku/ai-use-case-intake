@@ -42,6 +42,7 @@ from blueprint.completeness import (
     assess_capture,
 )
 from blueprint.discovery import DEFAULT_MODEL, build_discovery_options
+from blueprint.feedback import RequesterFeedback
 from blueprint.matching import DepartmentMatch, MatchError, match_departments
 from blueprint.review import ReviewDecision, review_status
 from blueprint.skills import SKILLS_DIR, DepartmentSkill, load_skills
@@ -300,6 +301,8 @@ class DiscoverySession:
         self._cost_offset = 0.0
         """Cost spent in previous subprocesses of this session (set on restore)."""
         self.turns: list[TurnResult] = []
+        self._prior_turns: list[dict[str, Any]] = []
+        """Turns from a restored snapshot, kept as written. See :meth:`_restore`."""
         self.idle_timeout_s = idle_timeout_s
         self.failure: str | None = None
         """Why the session died, if it did (budget, API error, timeout). ``None`` while healthy."""
@@ -315,6 +318,8 @@ class DiscoverySession:
         self._max_clarification_rounds = max_clarification_rounds
         self.reviews: list[ReviewDecision] = []
         """Append-only log of human decisions on this session's spec."""
+        self.feedback: list[RequesterFeedback] = []
+        """Append-only log of the requester's ratings of individual turns."""
         # The guard is owned here (not inside discovery.py) so its attempts are in the snapshot.
         self.web_search_guard = (
             WebSearchGuard(max_calls=max_web_searches) if web_search is not None else None
@@ -353,8 +358,15 @@ class DiscoverySession:
         self._client: ClaudeSDKClient | None = None
 
     def _restore(self, snapshot: Mapping[str, Any]) -> None:
-        """Rebuild every log from a snapshot. Turn results are not replayed; only their count."""
+        """Rebuild every log from a snapshot.
+
+        Turn results are not replayed as objects — a restored session has no live
+        ``TurnResult`` for work another process did. They are still carried forward
+        verbatim, because the snapshot is the audit trail: emitting only this process's
+        turns would overwrite the record of the conversation on the next save.
+        """
         self.session_id = snapshot.get("session_id") or None
+        self._prior_turns = [dict(t) for t in snapshot.get("turns", [])]
         self.turn = int(snapshot.get("turn", 0))
         self.total_cost_usd = float(snapshot.get("total_cost_usd", 0.0))
         self._cost_offset = self.total_cost_usd
@@ -371,6 +383,7 @@ class DiscoverySession:
         if snapshot.get("web_search") and self.web_search_guard is not None:
             self.web_search_guard = WebSearchGuard.from_dict(snapshot["web_search"])
         self.reviews = [ReviewDecision.from_dict(d) for d in snapshot.get("reviews", [])]
+        self.feedback = [RequesterFeedback.from_dict(f) for f in snapshot.get("feedback", [])]
         self.resumed = True
         logger.info(
             "session.restored",
@@ -379,6 +392,25 @@ class DiscoverySession:
                 "turn": self.turn,
                 "entries": len(self.state.entries),
                 "reviews": len(self.reviews),
+            },
+        )
+
+    def record_feedback(self, entry: RequesterFeedback) -> None:
+        """Append a requester's rating of one turn.
+
+        Raises:
+            ValueError: if the turn has not happened in this session.
+        """
+        if entry.turn > self.turn:
+            raise ValueError(f"turn {entry.turn} has not happened (session is on turn {self.turn})")
+        self.feedback.append(entry)
+        logger.info(
+            "feedback.recorded",
+            extra={
+                "session_id": self.session_id,
+                "turn": entry.turn,
+                "rating": entry.rating.value,
+                "has_comment": bool(entry.comment.strip()),
             },
         )
 
@@ -755,10 +787,11 @@ class DiscoverySession:
             "completeness": self.completeness.to_dict() if self._completeness_check else None,
             "open_gaps": {c.value: list(g) for c, g in self.completeness.gaps(self.state).items()},
             "reviews": [d.to_dict() for d in self.reviews],
+            "feedback": [f.to_dict() for f in self.feedback],
             "review_status": self.review_status,
             "resumed": self.resumed,
             "canvas": self.state.to_dict(),
-            "turns": [t.to_dict() for t in self.turns],
+            "turns": [*self._prior_turns, *(t.to_dict() for t in self.turns)],
         }
 
 

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -72,9 +73,11 @@ class TestFileRunStore:
         store = FileRunStore(tmp_path)
         store.save(snapshot(SESSION_A))
         store.save(snapshot(SESSION_B))
-        # Make the ordering explicit rather than relying on filesystem timestamp resolution.
-        (tmp_path / f"{SESSION_B}.json").touch()
         (tmp_path / "notes.json").write_text("{}", encoding="utf-8")
+        # Two saves in the same clock tick can share an mtime, and a stable sort then falls
+        # back to alphabetical order. Set the times apart so the test means what it says.
+        os.utime(tmp_path / f"{SESSION_A}.json", (1_700_000_000, 1_700_000_000))
+        os.utime(tmp_path / f"{SESSION_B}.json", (1_700_000_100, 1_700_000_100))
         assert list(store.ids()) == [SESSION_B, SESSION_A]
 
     def test_a_bad_id_never_reaches_the_filesystem(self, tmp_path: Path) -> None:

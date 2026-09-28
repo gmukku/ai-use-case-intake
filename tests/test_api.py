@@ -429,6 +429,45 @@ class TestReviewerSurface:
         assert "Which HRIS exactly?" in harness.clients[0].queries[-1]
         assert parse_sse(response.text)[-1][0] == "done"
 
+    async def test_a_delivered_send_back_is_not_delivered_again(self, harness: Harness) -> None:
+        # review_status stays "sent_back" after the question is asked, so a status check alone
+        # would offer to reopen forever — and a reload would ask the requester twice.
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.post(
+                f"/reviews/{session_id}/decision",
+                json={"action": "send_back", "reviewer": "dana", "note": "Which HRIS?"},
+            )
+            before = await client.get(f"/sessions/{session_id}")
+            assert before.json()["can_reopen"] is True
+
+            harness.clients[0].script.append(["Which system is it?"])
+            await client.post(f"/sessions/{session_id}/resume")
+
+            after = await client.get(f"/sessions/{session_id}")
+            assert after.json()["can_reopen"] is False
+            assert after.json()["review_status"] == "sent_back"  # still, until reviewed again
+            assert after.json()["outcome"] is None
+
+            sent = len(harness.clients[0].queries)
+            second = await client.post(f"/sessions/{session_id}/resume")
+        assert second.status_code == 200
+        assert len(harness.clients[0].queries) == sent  # the model was not asked twice
+
+    async def test_a_second_send_back_can_be_delivered(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            for note in ("Which HRIS?", "And which payroll system?"):
+                await client.post(
+                    f"/reviews/{session_id}/decision",
+                    json={"action": "send_back", "reviewer": "dana", "note": note},
+                )
+                harness.clients[0].script.append([f"Asking about: {note}"])
+                assert (await client.get(f"/sessions/{session_id}")).json()["can_reopen"] is True
+                await client.post(f"/sessions/{session_id}/resume")
+            assert (await client.get(f"/sessions/{session_id}")).json()["can_reopen"] is False
+        assert "And which payroll system?" in harness.clients[0].queries[-1]
+
     async def test_resume_without_a_send_back_just_reopens(self, harness: Harness) -> None:
         async with harness.client() as client:
             session_id = await complete_canvas(client)
@@ -561,3 +600,116 @@ async def _settle() -> None:
     """Let the background build task run to completion."""
     for _ in range(50):
         await asyncio.sleep(0)
+
+
+class TestTranscript:
+    async def test_restores_both_sides_of_every_turn(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            response = await client.get(f"/sessions/{session_id}/messages")
+        body = response.json()
+        assert [m["role"] for m in body["messages"]] == ["you", "agent"]
+        assert body["messages"][0]["text"] == "hello"
+        assert "That covers everything" in body["messages"][1]["text"]
+        assert body["messages"][0]["turn"] == 1
+
+    async def test_a_reviewers_send_back_note_never_appears(self, harness: Harness) -> None:
+        # The note is the `user_text` of its turn, but the requester never saw it. Only the
+        # agent's reply — written to stand on its own — belongs in their transcript.
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.post(
+                f"/reviews/{session_id}/decision",
+                json={"action": "send_back", "reviewer": "dana", "note": "Which HRIS exactly?"},
+            )
+            harness.clients[0].script.append(["One more thing — which system is it?"])
+            await client.post(f"/sessions/{session_id}/resume")
+            response = await client.get(f"/sessions/{session_id}/messages")
+        body = response.json()
+        assert "Which HRIS exactly?" not in response.text
+        assert [m["role"] for m in body["messages"]] == ["you", "agent", "agent"]
+        assert body["messages"][2]["text"] == "One more thing — which system is it?"
+
+    async def test_a_closed_session_still_has_its_transcript(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.delete(f"/sessions/{session_id}")
+            response = await client.get(f"/sessions/{session_id}/messages")
+        assert len(response.json()["messages"]) == 2
+
+    async def test_unknown_session_is_404(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            response = await client.get(f"/sessions/{'b' * 36}/messages")
+        assert response.status_code == 404
+
+
+class TestFeedback:
+    async def test_rating_a_turn_is_stored_and_read_back(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            posted = await client.post(
+                f"/sessions/{session_id}/feedback",
+                json={"turn": 1, "rating": "up", "comment": "exactly right"},
+            )
+            transcript = await client.get(f"/sessions/{session_id}/messages")
+        assert posted.status_code == 204
+        assert transcript.json()["feedback"] == {"1": "up"}
+        stored = harness.store.load(session_id)["feedback"]
+        assert stored[0]["rating"] == "up" and stored[0]["comment"] == "exactly right"
+
+    async def test_changing_a_rating_appends_and_the_latest_wins(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            for rating in ("down", "up"):
+                await client.post(
+                    f"/sessions/{session_id}/feedback", json={"turn": 1, "rating": rating}
+                )
+            transcript = await client.get(f"/sessions/{session_id}/messages")
+        assert transcript.json()["feedback"] == {"1": "up"}
+        assert len(harness.store.load(session_id)["feedback"]) == 2  # the log keeps both
+
+    async def test_feedback_survives_the_next_turn(self, harness: Harness) -> None:
+        # The live session owns the snapshot, so a rating held only in the store would be
+        # overwritten the next time a turn persisted.
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.post(f"/sessions/{session_id}/feedback", json={"turn": 1, "rating": "up"})
+            harness.clients[0].script.append(["Anything else?"])
+            await client.post(f"/sessions/{session_id}/messages", json={"text": "more"})
+        assert harness.store.load(session_id)["feedback"][0]["turn"] == 1
+
+    async def test_a_closed_session_can_still_be_rated(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.delete(f"/sessions/{session_id}")
+            response = await client.post(
+                f"/sessions/{session_id}/feedback", json={"turn": 1, "rating": "down"}
+            )
+        assert response.status_code == 204
+        assert harness.store.load(session_id)["feedback"][0]["rating"] == "down"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"turn": 0, "rating": "up"},  # not a real turn number
+            {"turn": 1, "rating": "meh"},  # not a rating
+            {"turn": 1},  # no rating at all
+            {"turn": 1, "rating": "up", "comment": "x" * 2001},  # over the comment cap
+        ],
+    )
+    async def test_invalid_feedback_is_rejected(
+        self, harness: Harness, body: dict[str, Any]
+    ) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            response = await client.post(f"/sessions/{session_id}/feedback", json=body)
+        assert response.status_code == 422
+
+    async def test_cannot_rate_a_turn_that_has_not_happened(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            response = await client.post(
+                f"/sessions/{session_id}/feedback", json={"turn": 9, "rating": "up"}
+            )
+        assert response.status_code == 422
+        assert "has not happened" in response.json()["detail"]
