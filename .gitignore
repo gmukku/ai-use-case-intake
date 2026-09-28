@@ -27,3 +27,8 @@ evals/**/results/
 
 # model-generated prototypes (one folder per session); promote deliberately if worth keeping
 prototypes/
+
+# SQLite store + audit trail (holds stakeholder text)
+runs/*.db
+runs/*.db-wal
+runs/*.db-shm

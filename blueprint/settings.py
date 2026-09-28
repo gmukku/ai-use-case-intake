@@ -50,6 +50,12 @@ class Settings:
     """Bearer token for reviewer/admin/build endpoints; ``None`` leaves them open (local dev)."""
     session_idle_s: float
     cors_origins: tuple[str, ...]
+    store_path: str
+    """SQLite file for runs and the audit trail; ``""`` keeps the JSON files."""
+    redact_stored_text: bool
+    """Strip identifiers from free text on the way into the store. See redaction.py."""
+    retention_days: int
+    """Purge runs older than this. 0 keeps everything, and is the default on purpose."""
 
     def to_dict(self) -> dict[str, Any]:
         """Loggable view: presence of secrets, never their values."""
@@ -68,6 +74,9 @@ class Settings:
             "admin_token_set": self.admin_token is not None,
             "session_idle_s": self.session_idle_s,
             "cors_origins": list(self.cors_origins),
+            "store": self.store_path or "files",
+            "redact_stored_text": self.redact_stored_text,
+            "retention_days": self.retention_days,
         }
 
 
@@ -76,6 +85,19 @@ def _flag(env: Mapping[str, str], name: str, default: bool = False) -> bool:
     if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int(env: Mapping[str, str], name: str, default: int, *, minimum: int = 0) -> int:
+    raw = env.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SettingsError(f"{name} must be a whole number, got {raw!r}") from exc
+    if value < minimum:
+        raise SettingsError(f"{name} must be at least {minimum}, got {value}")
+    return value
 
 
 def _float(env: Mapping[str, str], name: str, default: float, *, minimum: float) -> float:
@@ -154,4 +176,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             for o in env.get("BLUEPRINT_CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
             if o.strip()
         ),
+        store_path=env.get("BLUEPRINT_STORE_PATH", "").strip(),
+        redact_stored_text=_flag(env, "BLUEPRINT_REDACT", default=True),
+        retention_days=_int(env, "BLUEPRINT_RETENTION_DAYS", default=0),
     )

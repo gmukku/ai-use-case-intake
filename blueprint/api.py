@@ -67,7 +67,15 @@ from blueprint.review import (
 )
 from blueprint.settings import Settings, load_settings
 from blueprint.skills import DepartmentSkill, load_skills
-from blueprint.store import FileRunStore, RunNotFoundError, RunStore, validate_session_id
+from blueprint.store import (
+    AuditEvent,
+    FileRunStore,
+    RunNotFoundError,
+    RunStore,
+    SqliteRunStore,
+    build_events,
+    validate_session_id,
+)
 from blueprint.websearch import TavilyClient
 
 logger = logging.getLogger(__name__)
@@ -275,6 +283,17 @@ def default_session_factory(
     )
 
 
+def _default_store(settings: Settings) -> RunStore:
+    """SQLite when a path is configured, the JSON files otherwise.
+
+    Both satisfy `RunStore`, so nothing below this line changes either way — which is what
+    the protocol was for.
+    """
+    if settings.store_path:
+        return SqliteRunStore(Path(settings.store_path), redact=settings.redact_stored_text)
+    return FileRunStore(Path("runs"))
+
+
 def create_app(
     settings: Settings,
     *,
@@ -285,7 +304,7 @@ def create_app(
     prototypes_dir: Path = PROTOTYPES_DIR,
 ) -> FastAPI:
     """Assemble the application. Everything with side effects is injectable for tests."""
-    run_store: RunStore = store if store is not None else FileRunStore(Path("runs"))
+    run_store: RunStore = store if store is not None else _default_store(settings)
     loaded_skills = skills if skills is not None else load_skills()
     registry = Registry(idle_s=settings.session_idle_s)
     builds: dict[str, BuildStatus] = {}
@@ -347,7 +366,42 @@ def create_app(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session") from exc
 
     def _persist(session: DiscoverySession) -> None:
-        run_store.save(session.to_dict())
+        snapshot = session.to_dict()
+        run_store.save(snapshot)
+        _record_pipeline_events(snapshot)
+
+    def _audit(session_id: str, action: str, *, actor: str = "system", **detail: object) -> None:
+        """Record a human action.
+
+        Never fails a request: an audit write that breaks the thing it is auditing is
+        worse than a gap in the trail, which the JSON-lines logs still cover.
+        """
+        try:
+            run_store.append_event(
+                AuditEvent(session_id=session_id, action=action, actor=actor, detail=detail)
+            )
+        except Exception:
+            logger.exception("api.audit.failed", extra={"session_id": session_id})
+
+    def _record_pipeline_events(snapshot: dict[str, Any]) -> None:
+        """Append the agent's own steps for turns that have happened since the last save.
+
+        Derived from the snapshot rather than written during the turn, so there is one source
+        of truth and a migrated run ends up with the same trail as a live one. Idempotent by
+        counting what is already recorded.
+        """
+        session_id = str(snapshot.get("session_id") or "")
+        if not session_id:
+            return
+        try:
+            # Count only the derived actions: human events share the log and would otherwise
+            # push this index past the events that still need writing.
+            derived = {"departments.matched", "turn.completed", "tool.called"}
+            already = sum(1 for e in run_store.events(session_id) if e.action in derived)
+            for event in list(build_events(snapshot))[already:]:
+                run_store.append_event(event)
+        except Exception:
+            logger.exception("api.audit.failed", extra={"session_id": session_id})
 
     def _build_status(session_id: str, snapshot: dict[str, Any]) -> BuildStatus:
         if session_id in builds:
@@ -461,6 +515,7 @@ def create_app(
         await session.start()
         registry.add(session_id, session)
         logger.info("api.session.created", extra={"session_id": session_id})
+        _audit(session_id, "session.created", actor="requester")
         return SessionCreated(session_id=session_id)
 
     @app.post("/sessions/{session_id}/messages")
@@ -559,6 +614,14 @@ def create_app(
         logger.info(
             "api.feedback",
             extra={"session_id": session_id, "turn": entry.turn, "rating": entry.rating.value},
+        )
+        _audit(
+            session_id,
+            "feedback.recorded",
+            actor="requester",
+            turn=entry.turn,
+            rating=entry.rating.value,
+            comment=entry.comment,
         )
 
     @app.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -668,6 +731,15 @@ def create_app(
                 "spec_version": spec.version,
             },
         )
+        _audit(
+            session_id,
+            "review.decision",
+            actor=body.reviewer,
+            action_taken=body.action.value,
+            spec_version=spec.version,
+            risk_level=spec.risk.level.value,
+            note=body.note,
+        )
         return {"review_status": snap["review_status"], "spec_version": spec.version}
 
     # -- admin surface --------------------------------------------------------------------
@@ -723,6 +795,18 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
+    @app.get("/admin/sessions/{session_id}/audit", dependencies=[admin])
+    async def audit_trail(session_id: str) -> dict[str, Any]:
+        """The append-only record of what happened to one session, oldest first.
+
+        Distinct from the trace: the trace is current state, this is history. A spec that was
+        sent back and then approved shows both decisions here and only the latest there.
+        """
+        session_id = _sid(session_id)
+        if not run_store.exists(session_id) and registry.get(session_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+        return {"events": [e.to_dict() for e in run_store.events(session_id)]}
+
     @app.get("/admin/sessions/{session_id}/trace", dependencies=[admin])
     async def trace(session_id: str) -> dict[str, Any]:
         session_id = _sid(session_id)
@@ -777,12 +861,21 @@ def create_app(
                     status="ok" if result.ok else "failed",
                     result=result.to_dict(),
                 )
+                _audit(
+                    session_id,
+                    "build.finished",
+                    ok=result.ok,
+                    files=len(result.verification.files),
+                    cost_usd=result.cost_usd,
+                    violations=list(result.verification.violations),
+                )
             except Exception as exc:  # a build must never take the API down
                 logger.exception("api.build.crashed", extra={"session_id": session_id})
                 builds[session_id] = BuildStatus(
                     session_id=session_id, status="failed", result={"error": str(exc)}
                 )
 
+        _audit(session_id, "build.started", template=select_template(spec))
         task = asyncio.create_task(run())
         background.add(task)
         task.add_done_callback(background.discard)

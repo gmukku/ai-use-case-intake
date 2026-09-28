@@ -17,7 +17,7 @@ from blueprint.orchestrator import DiscoverySession
 from blueprint.review import DiscoverySpec
 from blueprint.settings import Settings
 from blueprint.skills import SKILLS_DIR, load_skills
-from blueprint.store import RunNotFoundError
+from blueprint.store import AuditEvent, RunNotFoundError
 from tests.test_orchestrator import FakeAssessor, FakeClient, FakeMatcher, Step
 
 SKILLS = load_skills(SKILLS_DIR)
@@ -57,6 +57,9 @@ def settings(**overrides: Any) -> Settings:
         "admin_token": None,
         "session_idle_s": 900.0,
         "cors_origins": ("http://localhost:3000",),
+        "store_path": "",
+        "redact_stored_text": False,
+        "retention_days": 0,
     }
     base.update(overrides)
     return Settings(**base)
@@ -67,6 +70,7 @@ class MemoryStore:
 
     def __init__(self) -> None:
         self.saved: dict[str, dict[str, Any]] = {}
+        self.audit: list[AuditEvent] = []
 
     def save(self, snapshot: dict[str, Any]) -> None:
         self.saved[str(snapshot["session_id"])] = json.loads(json.dumps(snapshot))
@@ -81,6 +85,12 @@ class MemoryStore:
 
     def ids(self) -> Iterator[str]:
         return iter(reversed(list(self.saved)))
+
+    def append_event(self, event: AuditEvent) -> None:
+        self.audit.append(event)
+
+    def events(self, session_id: str) -> list[AuditEvent]:
+        return [e for e in self.audit if e.session_id == session_id]
 
 
 def fake_build_result(session_id: str, *, ok: bool = True) -> BuildResult:
@@ -784,3 +794,101 @@ class TestAdminEvals:
             async with harness.client() as client:
                 response = await client.get("/admin/evals/skill_matching/..%2F..%2Fsecret")
         assert response.status_code in (400, 404)
+
+
+class TestAuditTrail:
+    async def test_human_decisions_are_recorded_with_the_actor(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.post(
+                f"/reviews/{session_id}/decision",
+                json={"action": "approve", "reviewer": "Dana", "note": "looks good"},
+            )
+            response = await client.get(f"/admin/sessions/{session_id}/audit")
+
+        events = response.json()["events"]
+        decision = next(e for e in events if e["action"] == "review.decision")
+        assert decision["actor"] == "Dana"
+        assert decision["detail"]["action_taken"] == "approve"
+        assert decision["detail"]["spec_version"] == 1
+
+    async def test_the_agents_own_steps_are_recorded_too(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            response = await client.get(f"/admin/sessions/{session_id}/audit")
+
+        actions = [e["action"] for e in response.json()["events"]]
+        assert "session.created" in actions
+        assert "departments.matched" in actions
+        assert "turn.completed" in actions
+        # "every retrieved example": one per tool call, including which SOP or example was read.
+        assert actions.count("tool.called") == len(CanvasCategory)
+
+    async def test_feedback_is_recorded(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.post(
+                f"/sessions/{session_id}/feedback",
+                json={"turn": 1, "rating": "down", "comment": "missed the point"},
+            )
+            response = await client.get(f"/admin/sessions/{session_id}/audit")
+
+        entry = next(e for e in response.json()["events"] if e["action"] == "feedback.recorded")
+        assert entry["actor"] == "requester"
+        assert entry["detail"]["rating"] == "down"
+
+    async def test_pipeline_events_are_not_duplicated_across_saves(self, harness: Harness) -> None:
+        # _persist runs on every turn and derives events from the whole snapshot each time.
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            harness.clients[0].script.append(["Anything else?"])
+            await client.post(f"/sessions/{session_id}/messages", json={"text": "more"})
+            response = await client.get(f"/admin/sessions/{session_id}/audit")
+
+        actions = [e["action"] for e in response.json()["events"]]
+        assert actions.count("turn.completed") == 2
+        assert actions.count("departments.matched") == 1
+
+    async def test_a_human_event_does_not_shift_the_derived_index(self, harness: Harness) -> None:
+        # Human events share the log; counting all of them would skip derived ones.
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            await client.post(
+                f"/reviews/{session_id}/decision",
+                json={"action": "send_back", "reviewer": "Dana", "note": "Which HRIS?"},
+            )
+            harness.clients[0].script.append(["Which system is it?"])
+            await client.post(f"/sessions/{session_id}/resume")
+            response = await client.get(f"/admin/sessions/{session_id}/audit")
+
+        actions = [e["action"] for e in response.json()["events"]]
+        assert actions.count("turn.completed") == 2  # the second turn was still recorded
+
+    async def test_the_decision_survives_a_later_one(self, harness: Harness) -> None:
+        # The snapshot keeps current state; the trail keeps what happened.
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            for action, note in [("send_back", "Which HRIS?"), ("approve", "")]:
+                await client.post(
+                    f"/reviews/{session_id}/decision",
+                    json={"action": action, "reviewer": "Dana", "note": note},
+                )
+            response = await client.get(f"/admin/sessions/{session_id}/audit")
+
+        decisions = [
+            e["detail"]["action_taken"]
+            for e in response.json()["events"]
+            if e["action"] == "review.decision"
+        ]
+        assert decisions == ["send_back", "approve"]
+
+    async def test_unknown_session_is_404(self, harness: Harness) -> None:
+        async with harness.client() as client:
+            response = await client.get(f"/admin/sessions/{'c' * 36}/audit")
+        assert response.status_code == 404
+
+    async def test_needs_the_admin_token(self) -> None:
+        harness = make_harness(admin_token="s3cret")
+        async with harness.client() as client:
+            session_id = await complete_canvas(client)
+            assert (await client.get(f"/admin/sessions/{session_id}/audit")).status_code == 401

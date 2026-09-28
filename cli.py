@@ -56,6 +56,12 @@ from blueprint.review import (
 )
 from blueprint.settings import Settings, SettingsError, load_settings
 from blueprint.skills import load_skills
+from blueprint.store import (
+    FileRunStore,
+    SqliteRunStore,
+    build_events,
+    migrate_files_to_sqlite,
+)
 from blueprint.websearch import TavilyClient
 
 RUNS_DIR = Path("runs")
@@ -310,6 +316,32 @@ async def cmd_review(
     return 0
 
 
+def cmd_migrate(target: Path, *, redact: bool) -> int:
+    """Copy every JSON run into SQLite, then say what moved and what was left behind."""
+    source = FileRunStore(RUNS_DIR)
+    store = SqliteRunStore(target, redact=redact)
+    moved = migrate_files_to_sqlite(source, store)
+
+    # A run that predates the audit table still gets a trail, derived from its snapshot, so
+    # the history does not start at whenever this feature landed.
+    derived = 0
+    for session_id in moved:
+        if not store.events(session_id):
+            for event in build_events(store.load(session_id)):
+                store.append_event(event)
+                derived += 1
+
+    print(f"  migrated {len(moved)} run(s) into {target}")
+    print(f"  derived  {derived} audit event(s) from their snapshots")
+    print(f"  redaction {'on' if redact else 'OFF'}")
+    if moved:
+        print()
+        print("  runs/*.json are left in place; delete them once you have checked the copy")
+        print(f"  set BLUEPRINT_STORE_PATH={target} to point the API at it")
+    store.close()
+    return 0
+
+
 async def cmd_build(settings: Settings, *, run_file: Path, force: bool) -> int:
     """Build the prototype for an approved run. The result is written into the run file."""
     snapshot = _load_snapshot(run_file)
@@ -384,6 +416,14 @@ def main() -> None:
     build.add_argument("run_file", type=Path)
     build.add_argument("--force", action="store_true", help="build even if not approved (dev only)")
 
+    migrate = sub.add_parser("migrate", help="copy runs/*.json into a SQLite store")
+    migrate.add_argument("--to", type=Path, default=RUNS_DIR / "blueprint.db")
+    migrate.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="store text verbatim; by default identifiers are stripped on the way in",
+    )
+
     args = parser.parse_args()
 
     # Windows consoles default to a legacy code page; force UTF-8 so trace glyphs print.
@@ -418,6 +458,8 @@ def main() -> None:
         )
     elif command == "build":
         code = asyncio.run(cmd_build(settings, run_file=args.run_file, force=args.force))
+    elif command == "migrate":
+        code = cmd_migrate(args.to, redact=not args.no_redact)
     else:
         code = asyncio.run(cmd_resume(settings, run_file=args.run_file, script=args.script))
     sys.exit(code)
