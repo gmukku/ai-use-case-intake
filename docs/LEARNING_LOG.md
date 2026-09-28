@@ -39,8 +39,11 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-15 | 6 | Builder subagent: parent + `AgentDefinition` via the `Agent` tool, a `PreToolUse` hook as the entire permission policy (workspace jail, command allowlist, parent denied), Python-side verification, the first output-format template (Q&A stub). Live build: six files, 8 tests passed, two commands denied and adapted, $0.46. Found and closed an auto-memory leak into every agent. | `8fd0b1b` |
 
-State at last update: 240 tests, ruff + mypy `--strict` clean, steps 1–6 of 13 complete plus
-hardening and web search. Next: step 7 (FastAPI).
+| 2026-09-28 | 7 | FastAPI over the whole pipeline: three route groups for the three audiences, SSE for the requester's turn, a `RunStore` behind an interface, one-turn-at-a-time session locking, an idle sweeper, bearer token on reviewer/admin, builds as background tasks. Live: a real turn streamed end to end, snapshot persisted under the API's own uuid, queue picking up earlier CLI runs from the same `runs/`. | `7f844f6` |
+
+State at last update: 293 tests, ruff + mypy `--strict` clean, steps 1–7 of 13 complete plus
+hardening and web search. The backend is feature-complete; next is step 8 (Next.js + the
+requester view), which is also where the React learning starts.
 
 ---
 
@@ -358,6 +361,49 @@ for outputs with no crisp reference (spec quality, example relevance).
 dispatches tool calls through the *real* in-process MCP server. `FakeMatcher` keeps the
 classifier out of unit tests. Unit tests never call the model; CI has no API key by design.
 
+### The surface *is* the permission
+CLAUDE.md asks for three views. The tempting implementation is one API with a role flag on
+the caller; the implementation here is three route groups whose *responses are built from
+different data*. `/sessions/{id}` assembles a `SessionStatus` that has no field for a
+category, a risk level, or a classifier result, so there is no flag to get wrong and no
+serializer to forget: a requester cannot be shown risk because the model they receive cannot
+carry it. The bearer token on `/reviews` and `/admin` is the second layer, not the first.
+*`blueprint/api.py` `SessionStatus`, `QueueItem`*
+
+### SSE, not WebSockets
+A discovery turn is one-way streaming: the stakeholder sends a message over plain POST, then
+listens. Server-sent events are one HTTP response with `text/event-stream`, so they keep the
+request/response model, work through proxies, and reconnect on their own; a WebSocket would
+add a second protocol for a channel that never needs to talk back mid-turn. Named events
+(`text`, `activity`, `done`, `error`) give the frontend a vocabulary that is ours, one more
+layer away from the SDK's wire format. **Gotcha:** buffering. `X-Accel-Buffering: no` and
+`Cache-Control: no-cache` are what stop a proxy from holding the whole turn and delivering it
+as one block, which looks exactly like the agent being slow.
+*`blueprint/api.py` `_sse`, `_stream_turn`*
+
+### One turn at a time, per session
+Each session owns an SDK subprocess, and a subprocess has one conversation. Two overlapping
+turns would interleave into the same transcript, so each live session carries an
+`asyncio.Lock`: the route acquires it and the SSE generator releases it in `finally`, and a
+second turn gets `409` rather than a queue. Refusing is better than queueing here, because
+the requester is a human who should be told their last message is still running.
+*`blueprint/api.py` `LiveSession`, `send_message`*
+
+### The run store is an interface from the first day it has one caller
+`FileRunStore` writes the same `runs/<id>.json` the CLI has always written, but the API
+depends on the `RunStore` Protocol, not on files. Step 12 swaps SQLite in behind it without
+touching a route. The cost of the abstraction was about thirty lines; the cost of not having
+it would have been a step-12 rewrite of every handler. The id is validated against a
+UUID-shaped pattern *before* it becomes a path, so a traversal attempt never reaches the
+filesystem. *`blueprint/store.py`*
+
+### Everything with a side effect is injectable, again
+`create_app` takes `session_factory`, `store`, `build_fn`, `skills` and `prototypes_dir`. The
+whole API test suite runs against the real FastAPI app over a real ASGI transport with no
+subprocess, no network and no disk — the same pattern as the orchestrator's `client_factory`,
+now one layer up. Thirty-two tests in 1.7 s is what makes it cheap to keep them honest.
+*`tests/test_api.py`*
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -389,12 +435,23 @@ project rules were added. "It's configured" is not evidence.
 ` escapes for the fourth time (CLI rewrite, orchestrator framing string). | Rule, finally applied: files containing escapes are written with the editor tool, never through a shell heredoc. |
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
+| The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| `POST /builds` guarded with "is a build running?", which read as idempotent and was not: between two requests the first build finished, so the second started a fresh one and overwrote a ~$0.46 workspace. | The test I wrote to confirm the guard is what disproved it — the assertion I expected to be trivial (`len(build_calls) == 1`) was the one that failed. State that changes on its own needs the *finished* case handled explicitly, not just the in-flight one. |
 
 ---
 
 ## Deferred and open
 
-- **Bedrock auth path**: `.env.example` documents it; not yet exercised. Verify before step 7.
+- **Bedrock auth path**: `.env.example` documents it; still not exercised. Step 7 came and went
+  on the API-key path. Worth proving before the README claims both work.
+- **The session registry is in-process**, so the API runs as exactly one worker today. More than
+  one uvicorn worker would route a requester's second message to a process that has never heard
+  of their session. Step 12's store is where a shared session lookup would live; until then this
+  is a documented single-process deployment, not an accident.
+- **Reviewer identity is a string in the request body.** One shared bearer token says *whether*
+  a caller may review, and `reviewer` in the payload says who they claim to be. Fine for a
+  portfolio demo, not for an audit trail anyone relies on; real deployment needs per-user auth
+  before the review log means anything.
 - **Transcript redaction**: stakeholder text lands verbatim in `runs/` and logs. Local-only
   today; step 12's SQLite store needs redaction and retention.
 - **HR skill file and rubric review** by the domain owner: `skills/hr/SKILL.md` and
