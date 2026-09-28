@@ -113,21 +113,34 @@ _NONE_RE: Final = re.compile(
     r"(systems?|integrations?|tools?|apps?|sources?)\b|\bnone\b",
     re.IGNORECASE,
 )
-_WRITE_RE: Final = re.compile(
+# A write is one of these verbs followed, inside the same clause, by something that is a
+# system of record. The verbs are fixed; the targets are deliberately NOT a literal list.
+# An eval run found that the hand-written one had drifted until 74 of the systems the
+# department skills name (BambooHR, Greenhouse, QuickBooks, ServiceNow…) and 8 of the generic
+# types in _GENERIC_SYSTEMS were invisible here, while `named_integration` matched them all.
+# The targets now come from those same two sources, so the two rules cannot diverge again.
+_WRITE_VERB_RE: Final = re.compile(
     r"\b(writ(?:e|es|ing)|updat(?:e|es|ing)|push(?:es|ing)?|sync(?:s|ing)?|post(?:s|ing)?|"
-    r"enter(?:s|ing)?|creat(?:e|es|ing)|modif(?:y|ies|ying)|submit(?:s|ting)?)\b"
-    r"[^.;]{0,60}?\b(into|to|in)\b[^.;]{0,40}?\b(system|hris|hcm|erp|crm|ats|payroll|records?|"
-    r"database|ledger|netsuite|salesforce|workday|adp|hubspot|zendesk|jira)\b",
+    r"enter(?:s|ing)?|creat(?:e|es|ing)|modif(?:y|ies|ying)|submit(?:s|ting)?)\b",
     re.IGNORECASE,
 )
+# How far past the verb a target still reads as its object. A clause break ends the search:
+# "write the summary. Records live in X" is not a write into X.
+_WRITE_WINDOW: Final = 70
+# Systems of record that name no product.
+_WRITE_BASE_TARGETS: Final = ("system", "record", "records", "database", "ledger")
 _NEGATION_RE: Final = re.compile(
     r"\b(not|no|never|without|out of scope|excluded|shouldn't|should not|won't|will not|"
     r"doesn't|does not|don't|do not|isn't|is not|explicitly out)\b",
     re.IGNORECASE,
 )
+# "automatically route it" and "route it automatically" are the same request. The original
+# pattern only matched the first word order, so an eval case phrased the second way was missed.
+_AUTOMATION_ACTS: Final = r"(?:send|email|route|trigger|notify|update|create|submit|assign|file)"
 _AUTOMATION_RE: Final = re.compile(
-    r"\bworkflow automation\b|\bautomat(?:e|es|ed|ically|ion)\b[^.;]{0,40}\b(send|email|route|"
-    r"trigger|notify|update|create)\b",
+    r"\bworkflow automation\b"
+    rf"|\bautomat(?:e|es|ed|ically|ion)\b[^.;]{{0,40}}\b{_AUTOMATION_ACTS}\b"
+    rf"|\b{_AUTOMATION_ACTS}\b[^.;]{{0,40}}\bautomat(?:e|es|ed|ically|ion)\b",
     re.IGNORECASE,
 )
 _SENSITIVE_RE: Final = re.compile(
@@ -138,8 +151,10 @@ _SENSITIVE_RE: Final = re.compile(
     re.IGNORECASE,
 )
 _EXTERNAL_RE: Final = re.compile(
-    r"\b(public (?:web|internet|website)|the internet|external (?:web)?site|web search|"
-    r"scrap(?:e|ing))\b",
+    # `websites?` on its own: "the government website" is an external source however it is
+    # phrased, and an eval case phrased it that way rather than as "external website".
+    r"\b(public (?:web|internet|website)|the internet|external (?:web)?site|websites?|"
+    r"web search|scrap(?:e|ing))\b",
     re.IGNORECASE,
 )
 
@@ -163,6 +178,39 @@ def _system_names(skills: Mapping[str, DepartmentSkill]) -> list[str]:
                 ):
                     names.add(name)
     return sorted(names, key=len, reverse=True)
+
+
+def _write_targets(skills: Mapping[str, DepartmentSkill]) -> tuple[str, ...]:
+    """Everything that counts as a system of record: generic types, skill products, base nouns.
+
+    Deliberately the same sources ``named_integration`` matches on, so a system that rule can
+    see is never one this rule is blind to.
+    """
+    return (*_WRITE_BASE_TARGETS, *_GENERIC_SYSTEMS, *(n.lower() for n in _system_names(skills)))
+
+
+def _write_evidence(
+    text: str, verb_start: int, verb_end: int, targets: tuple[str, ...]
+) -> str | None:
+    """The verb through the system it acts on, or ``None`` if no system follows it.
+
+    Returns the whole phrase rather than the bare verb so the reviewer sees "write them into
+    BambooHR" instead of "write" — a flag without its evidence is just an accusation.
+    """
+    window = text[verb_end : verb_end + _WRITE_WINDOW]
+    # A sentence or clause break ends the verb's reach: "write the summary. Records live in X"
+    # is not a write into X.
+    for stop in (".", ";"):
+        cut = window.find(stop)
+        if cut != -1:
+            window = window[:cut]
+
+    best: int | None = None
+    for target in targets:
+        match = re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", window, re.IGNORECASE)
+        if match and (best is None or match.end() < best):
+            best = match.end()
+    return text[verb_start : verb_end + best] if best is not None else None
 
 
 def _negated(text: str, start: int) -> bool:
@@ -213,17 +261,21 @@ def assess_risk(
             )
 
     # writes_to_system: language about writing/updating records into a system, not negated.
+    write_targets = _write_targets(skills)
     for cat in (CanvasCategory.OUTPUT_FORMAT, CanvasCategory.SYSTEM_INTEGRATIONS):
         text = text_of.get(cat, "")
-        for m in _WRITE_RE.finditer(text):
+        for m in _WRITE_VERB_RE.finditer(text):
             if _negated(text, m.start()):
+                continue
+            evidence = _write_evidence(text, m.start(), m.end(), write_targets)
+            if evidence is None:
                 continue
             flags.append(
                 RiskFlag(
                     key="writes_to_system",
                     level=RiskLevel.HIGH,
                     category=cat,
-                    evidence=m.group(0),
+                    evidence=evidence,
                     note="The request implies writing to a system of record. A prototype must "
                     "not do this; confirm scope is read-only or human-submitted.",
                 )

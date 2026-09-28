@@ -1,0 +1,199 @@
+# Gold set for the risk gate.
+#
+# `assess_risk` is deterministic rules over the canvas summaries, so this suite costs nothing
+# and is exact — no model grades anything. That is the point: the gate decides whether a human
+# looks harder before a Builder touches anything, and a rule that silently stops firing should
+# be caught by a test run, not by an unreviewed build.
+#
+# The metric that matters is the FALSE NEGATIVE: a case a human says deserves extra scrutiny
+# that the rules wave through. A false positive costs a reviewer thirty seconds. A false
+# negative is the whole reason the gate exists.
+#
+# Each case gives the canvas summaries that matter (unnamed categories get a neutral filler)
+# plus the flags a human says should fire and whether extra scrutiny is warranted.
+#
+# Flags: named_integration, writes_to_system, workflow_automation, sensitive_data,
+#        external_sources, open_gaps
+
+- id: clean_summarizer
+  expect_flags: []
+  scrutiny: false
+  note: |
+    Nothing leaves the team, nothing is named, nothing is written. The gate should be quiet
+    here or reviewers learn to ignore it.
+  canvas:
+    system_integrations: No other systems are involved; it is all in one shared folder.
+    output_format: A short summary of each document for the team to read.
+    input_source: The documents the team already has locally.
+
+- id: named_product_workday
+  expect_flags: [named_integration]
+  scrutiny: true
+  note: A product name from the HR skill's system list is the clearest possible trigger.
+  canvas:
+    system_integrations: Forms come in through Workday and we export a spreadsheet.
+    output_format: A summary of what is missing from each form.
+
+- id: generic_system_type_hris
+  expect_flags: [named_integration]
+  scrutiny: true
+  note: |
+    "HRIS" names no product but is unambiguously a system of record. The rules treat generic
+    types as named on purpose — the risk is the integration, not the brand.
+  canvas:
+    system_integrations: The data eventually needs to reach our HRIS.
+    output_format: A per-hire view of what is outstanding.
+
+- id: email_only_is_not_an_integration
+  expect_flags: []
+  scrutiny: false
+  note: |
+    Everyone chases things over email. If email counted as an integration every case would
+    flag and the badge would mean nothing. Regression guard for that.
+  canvas:
+    system_integrations: They chase people over email, nothing else.
+    output_format: A draft reminder message.
+
+- id: writes_back_to_named_system
+  expect_flags: [named_integration, writes_to_system]
+  scrutiny: true
+  note: |
+    Reading is one risk; writing into a system of record is another. This is the highest the
+    rules go, and it should be.
+  canvas:
+    system_integrations: Records live in BambooHR.
+    output_format: Extract the fields and write them into BambooHR automatically.
+
+- id: negated_write_is_not_a_write
+  expect_flags: [named_integration]
+  scrutiny: true
+  note: |
+    "Does not write back" must not trip the write rule. The negation handling is the fragile
+    part of that rule, so it gets a case of its own.
+  canvas:
+    system_integrations: It reads from Salesforce.
+    output_format: It never writes back into Salesforce; it only drafts a note for a human.
+
+- id: workflow_automation_without_a_system
+  expect_flags: [workflow_automation]
+  scrutiny: true
+  note: |
+    Automating a hand-off is worth noting even with nothing named. Originally labeled
+    scrutiny:false on the assumption that extra scrutiny was reserved for named integrations.
+    It is not: `needs_extra_scrutiny` is level >= elevated, and CLAUDE.md names integrations
+    as a case that must reach it, not the only one. An automated side effect deserves a look
+    rather than a skim. Relabeled 2026-09-28.
+  canvas:
+    output_format: It should route the request to the right approver automatically.
+    system_integrations: Nothing else is involved.
+
+- id: sensitive_i9_documents
+  expect_flags: [sensitive_data]
+  scrutiny: true
+  note: |
+    I-9s carry identity documents. Flagged so the reviewer insists on synthetic samples, even
+    though nothing is integrated — and identity documents are exactly what a reviewer should
+    read carefully rather than skim. Relabeled 2026-09-28 with the two cases below.
+  canvas:
+    input_types: Scanned I-9 forms and copies of ID documents.
+    system_integrations: Nothing else is involved.
+
+- id: sensitive_plus_named_system
+  expect_flags: [named_integration, sensitive_data]
+  scrutiny: true
+  note: |
+    The combination a reviewer most needs to see: personal data and a system of record.
+  canvas:
+    input_types: Completed I-9 and W-4 forms.
+    system_integrations: They are filed into SharePoint and payroll reads them from ADP.
+    output_format: A checklist of what is missing per packet.
+
+- id: external_sources_web
+  expect_flags: [external_sources]
+  scrutiny: true
+  note: |
+    Content from outside the company boundary; the reviewer should ask about source trust.
+    Relabeled 2026-09-28: elevated means elevated.
+  canvas:
+    input_source: We also pull the current state rules from the government website.
+    system_integrations: Nothing else is involved.
+
+- id: open_gaps_attention
+  expect_flags: [open_gaps]
+  scrutiny: false
+  gaps:
+    value_proposition: [measurable_impact]
+  note: |
+    The clarification budget ran out with a category still thin. Not a risk in itself; it is
+    the reviewer's cue that the spec is built on an unanswered question.
+  canvas:
+    system_integrations: Nothing else is involved.
+    output_format: A summary for the team.
+
+- id: crm_abbreviation
+  expect_flags: [named_integration]
+  scrutiny: true
+  note: Same reasoning as HRIS — an abbreviation for a system of record still names one.
+  canvas:
+    system_integrations: Everything is tracked in the CRM.
+    output_format: A weekly digest of accounts that went quiet.
+
+- id: push_into_ticketing
+  expect_flags: [named_integration, writes_to_system]
+  scrutiny: true
+  note: |
+    "Push" and "create" are writes under other names. Worth a case because the obvious verb
+    is "write" and real stakeholders rarely use it.
+  canvas:
+    system_integrations: Tickets live in our help desk.
+    output_format: It should create the ticket in the help desk once the form is complete.
+
+- id: finance_named_and_sensitive
+  expect_flags: [named_integration, sensitive_data]
+  scrutiny: true
+  note: Finance equivalent of the HR case — bank details are at least as sensitive.
+  canvas:
+    system_integrations: Invoices are keyed into NetSuite.
+    input_types: Scanned invoices with bank account details.
+    output_format: Pull the totals out and compare them to the PO.
+
+- id: qa_chatbot_over_own_docs
+  expect_flags: []
+  scrutiny: false
+  note: |
+    The shape the Builder actually supports, and it should be quiet. If this flagged, every
+    buildable request would carry a badge.
+  canvas:
+    system_integrations: Nothing else is involved.
+    input_source: Our own policy documents in a shared folder.
+    output_format: A question-and-answer chatbot the team can ask.
+
+- id: no_systems_phrased_awkwardly
+  expect_flags: []
+  scrutiny: false
+  note: |
+    Negation regression: a stakeholder saying there is nothing to integrate, phrased the way
+    people actually phrase it rather than the way the regex was written.
+  canvas:
+    system_integrations: Honestly it doesn't touch any other systems at all.
+    output_format: A summary.
+
+- id: update_the_erp
+  expect_flags: [named_integration, writes_to_system]
+  scrutiny: true
+  note: |
+    "Update" is the third common word for a write, after "write" and "push".
+  canvas:
+    system_integrations: The ERP holds the master record.
+    output_format: Update the ERP with the corrected line items.
+
+- id: sharepoint_source_only
+  expect_flags: [named_integration]
+  scrutiny: true
+  note: |
+    Reading from SharePoint is still an integration with a permissions model behind it. The
+    prototype only reads, and the reviewer should confirm that.
+  canvas:
+    input_source: The checklist lives in SharePoint.
+    system_integrations: SharePoint is where the documents are stored.
+    output_format: A per-document summary.

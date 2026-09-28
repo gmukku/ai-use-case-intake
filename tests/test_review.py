@@ -336,3 +336,65 @@ class TestTitleFallbackIgnoresTheReviewer:
         )
         spec = compile_spec(snap, SKILLS)
         assert spec.title == "I run onboarding and the paperwork is a mess"
+
+
+class TestWriteRuleSeesEverySystemTheSkillsName:
+    """The write rule's targets are derived, not hand-listed. An eval run found the old
+    literal list had drifted until most named systems were invisible to it."""
+
+    def test_a_product_only_the_skills_know_about(self) -> None:
+        # BambooHR is in the HR skill's system list and was absent from the old literal list.
+        r = risk(output_format="Extract the fields and write them into BambooHR automatically.")
+        f = flags(r)["writes_to_system"]
+        assert f.level is RiskLevel.HIGH
+        assert "write them into BambooHR" in f.evidence
+
+    def test_a_generic_type_from_the_integration_rule(self) -> None:
+        r = risk(output_format="It should create the ticket in the help desk once complete.")
+        assert "writes_to_system" in flags(r)
+
+    def test_no_preposition_needed(self) -> None:
+        # "Update the ERP" is how people actually say it; the old pattern required into/to/in.
+        r = risk(output_format="Update the ERP with the corrected line items.")
+        assert "writes_to_system" in flags(r)
+
+    def test_every_named_system_is_reachable_by_both_rules(self) -> None:
+        # The invariant the fix exists to hold: a system `named_integration` can see is never
+        # one `writes_to_system` is blind to.
+        from blueprint.review import _system_names, _write_targets
+
+        targets = {t.lower() for t in _write_targets(SKILLS)}
+        assert {n.lower() for n in _system_names(SKILLS)} <= targets
+
+    def test_a_clause_break_ends_the_verbs_reach(self) -> None:
+        r = risk(output_format="Write the summary. Records live in the CRM and stay there.")
+        assert "writes_to_system" not in flags(r)
+
+    def test_a_write_with_no_system_after_it_is_not_flagged(self) -> None:
+        r = risk(output_format="Write a short summary for the team to read.")
+        assert "writes_to_system" not in flags(r)
+
+    def test_negation_still_wins(self) -> None:
+        r = risk(output_format="It never writes back into BambooHR; it only drafts a note.")
+        assert "writes_to_system" not in flags(r)
+
+
+class TestAutomationWordOrder:
+    def test_adverb_after_the_verb(self) -> None:
+        # "route it automatically" — the original pattern only matched "automatically route".
+        r = risk(output_format="It should route the request to the right approver automatically.")
+        assert "workflow_automation" in flags(r)
+
+    def test_adverb_before_the_verb_still_works(self) -> None:
+        r = risk(output_format="It should automatically send the reminder email.")
+        assert "workflow_automation" in flags(r)
+
+
+class TestExternalSourcePhrasing:
+    def test_a_plain_website_counts(self) -> None:
+        r = risk(input_source="We pull the current state rules from the government website.")
+        assert "external_sources" in flags(r)
+
+    def test_internal_documents_do_not(self) -> None:
+        r = risk(input_source="Our own policy documents in a shared folder.")
+        assert "external_sources" not in flags(r)

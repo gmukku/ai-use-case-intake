@@ -1,0 +1,199 @@
+# Gold set for the completeness checker.
+#
+# The checker decides, per recorded summary, which rubric elements are still missing. A gap it
+# reports becomes a follow-up question in the same reply, so it directly shapes the
+# conversation: miss a real gap and the spec ships thin; invent one and the stakeholder gets
+# asked something they already answered.
+#
+# Each case is (category, summary) plus the rubric keys a human says are genuinely absent.
+# `expect_missing: []` means the summary is sufficient. Labels are the judge; no LLM grades.
+#
+# Rubric keys by category:
+#   key_stakeholders     performers, dependents
+#   key_activities       process_steps, headcount, frequency
+#   value_proposition    core_problem, measurable_impact
+#   system_integrations  systems_named
+#   input_source         sources_named
+#   input_types          types_selected, samples_discussed
+#   output_format        formats_selected
+
+# --- key_stakeholders ---------------------------------------------------------------------
+
+- id: stakeholders_complete
+  category: key_stakeholders
+  expect_missing: []
+  note: Names who does it and who waits on it. Nothing left to ask.
+  summary: |
+    Two HR ops coordinators run the packet review day to day. Hiring managers wait on them
+    before a new hire can start, and payroll needs the verified packet before the first pay run.
+
+- id: stakeholders_performers_only
+  category: key_stakeholders
+  expect_missing: [dependents]
+  note: |
+    The canonical thin answer — "just the HR team" names performers and stops. This exact
+    shape triggered the clarification loop in the step 4 live run.
+  summary: Just the HR team handles it.
+
+- id: stakeholders_dependents_only
+  category: key_stakeholders
+  expect_missing: [performers]
+  note: Inverse of the case above; names who is affected without saying who does the work.
+  summary: |
+    Hiring managers and the payroll specialist are the ones held up when this is late.
+
+- id: stakeholders_vague_everyone
+  category: key_stakeholders
+  expect_missing: [performers, dependents]
+  note: |
+    "Everyone" is not an answer to either half. A checker that accepts this accepts anything.
+  summary: Basically everyone in the company touches it at some point.
+
+# --- key_activities -----------------------------------------------------------------------
+
+- id: activities_complete
+  category: key_activities
+  expect_missing: []
+  note: Steps, how many people, how often — all three present.
+  summary: |
+    A coordinator opens each submitted packet, checks it against the onboarding checklist
+    document by document, and emails the new hire when something is missing. Three people do
+    this, covering roughly 30 hires a month, so it is daily work.
+
+- id: activities_no_headcount_or_frequency
+  category: key_activities
+  expect_missing: [headcount, frequency]
+  note: |
+    Good process detail, no scale. CLAUDE.md asks for both "how many users" and "how often"
+    explicitly, because they decide whether automation is worth building.
+  summary: |
+    Someone opens the packet, checks each required form is filled in, and chases whatever is
+    missing over email.
+
+- id: activities_frequency_only
+  category: key_activities
+  expect_missing: [process_steps, headcount]
+  note: Volume without process. Common when a stakeholder leads with the number that hurts.
+  summary: It happens about 40 times a month and it is relentless.
+
+- id: activities_headcount_without_frequency
+  category: key_activities
+  expect_missing: [frequency]
+  note: |
+    Deliberately near the boundary: steps and headcount are there, cadence is not. Tests
+    whether the checker reads all three keys rather than passing on general richness.
+  summary: |
+    Two coordinators open each packet, work down the checklist, and email the hire about
+    anything missing. It is just the two of them doing all of it.
+
+# --- value_proposition --------------------------------------------------------------------
+
+- id: value_complete
+  category: value_proposition
+  expect_missing: []
+  note: Names the problem and a number that would move.
+  summary: |
+    The core problem is time: 20-30 minutes of manual checking per packet across ~30 hires a
+    month. Measurable as review minutes per packet and the rate of fields missed.
+
+- id: value_no_measure
+  category: value_proposition
+  expect_missing: [measurable_impact]
+  note: |
+    "Saves time" with nothing attached. The most common thin answer in this category and the
+    one that makes a spec unfalsifiable.
+  summary: It would save us a lot of time and reduce the frustration.
+
+- id: value_measure_without_problem
+  category: value_proposition
+  expect_missing: [core_problem]
+  note: A metric with no stated problem behind it.
+  summary: We would track it by looking at the monthly error count in the audit report.
+
+- id: value_qualitative_but_specific
+  category: value_proposition
+  expect_missing: []
+  note: |
+    Boundary case on purpose. "Audit exposure when the three-day deadline is missed" is a real
+    measurable impact even though no percentage appears. A checker that demands a number here
+    is too strict, and the follow-up would annoy a stakeholder who has already answered.
+  summary: |
+    The real problem is audit exposure: when the three-day I-9 deadline slips we are out of
+    compliance, and we would measure it as the share of hires whose Section 2 is signed on time.
+
+# --- system_integrations ------------------------------------------------------------------
+
+- id: systems_named_products
+  category: system_integrations
+  expect_missing: []
+  note: Products named; nothing left to ask.
+  summary: Forms arrive through Greenhouse, signed copies go to SharePoint, payroll reads ADP.
+
+- id: systems_vague_our_system
+  category: system_integrations
+  expect_missing: [systems_named]
+  note: |
+    "Our system" is exactly what a reviewer sent a spec back for in step 5. The checker
+    should have caught it before the reviewer had to.
+  summary: The data ends up in our system eventually.
+
+- id: systems_explicit_none
+  category: system_integrations
+  expect_missing: []
+  note: |
+    "Nothing else is involved" is a complete answer, not a gap. A checker that treats an
+    explicit none as missing would loop forever asking for a system that does not exist.
+  summary: Nothing else is involved; it is all in one shared folder.
+
+# --- input_source -------------------------------------------------------------------------
+
+- id: source_named
+  category: input_source
+  expect_missing: []
+  note: Named locations.
+  summary: |
+    The onboarding checklist and the state requirements guide both live in the HR SharePoint
+    library; packets come from the BambooHR onboarding module.
+
+- id: source_vague
+  category: input_source
+  expect_missing: [sources_named]
+  note: |
+    "Somewhere" is not a source.
+  summary: The reference documents are around somewhere, I would have to check.
+
+# --- input_types --------------------------------------------------------------------------
+
+- id: types_with_samples
+  category: input_types
+  expect_missing: []
+  note: Types chosen and real samples offered. CLAUDE.md asks for samples explicitly.
+  summary: |
+    Scanned and e-signed PDFs, plus a typed question from the coordinator. I can send two
+    redacted packets, one clean and one with missing fields.
+
+- id: types_without_samples
+  category: input_types
+  expect_missing: [samples_discussed]
+  note: |
+    Types are clear, no samples offered or discussed. The Builder needs real examples, so
+    this is a genuine follow-up rather than pedantry.
+  summary: Mostly document uploads — scanned PDFs of the completed forms.
+
+# --- output_format ------------------------------------------------------------------------
+
+- id: output_named_format
+  category: output_format
+  expect_missing: []
+  note: A format the Builder has a template for.
+  summary: |
+    A per-packet checklist of what is missing, plus a question-and-answer chatbot the
+    coordinators can ask about the requirements.
+
+- id: output_vague_help
+  category: output_format
+  expect_missing: [formats_selected]
+  note: |
+    "Help with it" names no format. The output format decides which Builder template applies,
+    so an unanswered one blocks the whole downstream step.
+  summary: Something that just helps with the whole thing, really.
