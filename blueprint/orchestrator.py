@@ -284,6 +284,7 @@ class DiscoverySession:
         assess_fn: AssessFn = assess_capture,
         max_clarification_rounds: int = MAX_CLARIFICATION_ROUNDS,
         snapshot: Mapping[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> None:
         """Create a fresh session, or restore one from a ``to_dict`` snapshot.
 
@@ -337,8 +338,17 @@ class DiscoverySession:
             assess=self._assess if completeness_check else None,
         )
         resume_id = str(snapshot.get("session_id") or "") if snapshot is not None else ""
+        # A pinned id is the caller's, and stays authoritative: it is the registry key and the
+        # snapshot filename, so letting a ResultMessage rename the session mid-run would strand
+        # the stored run under its old name. Divergence is logged, never silently adopted.
+        self._pinned_session_id: str | None = resume_id or session_id or None
         if resume_id:
             self.options = replace(self.options, resume=resume_id)
+        elif session_id:
+            # A caller-chosen UUID becomes the SDK's session id too, so the API, the SDK
+            # transcript, and the snapshot file share one identifier from the first turn.
+            self.session_id = session_id
+            self.options = replace(self.options, session_id=session_id)
         self._client_factory = client_factory
         self._client: ClaudeSDKClient | None = None
 
@@ -568,7 +578,16 @@ class DiscoverySession:
             raise TurnProtocolError(f"turn {turn}: stream ended without a ResultMessage")
 
         if result is not None:
-            self.session_id = result.session_id
+            if self._pinned_session_id and result.session_id != self._pinned_session_id:
+                logger.warning(
+                    "session.id_mismatch",
+                    extra={
+                        "session_id": self._pinned_session_id,
+                        "sdk_session_id": result.session_id,
+                    },
+                )
+            else:
+                self.session_id = result.session_id
             # The SDK reports a RUNNING TOTAL per ResultMessage, not a per-turn cost, and that
             # total restarts at zero in each new subprocess. After a resume, the cost spent in
             # earlier processes is carried in ``_cost_offset`` so the session total keeps rising.

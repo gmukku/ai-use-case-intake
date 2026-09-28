@@ -847,3 +847,39 @@ class TestSnapshot:
         assert snap["canvas"]["current"]["key_stakeholders"] == "HR"
         assert snap["turns"][0]["captured"] == ["key_stakeholders"]
         assert snap["turns"][0]["tool_calls"][0]["name"] == RECORD_TOOL_FULL_NAME
+
+
+class TestSessionIdentity:
+    """A caller-supplied id is the key the API and the run store use, so it must not move."""
+
+    async def test_an_unpinned_session_adopts_the_id_the_sdk_reports(self) -> None:
+        session, _ = make_session([["Hello."]])
+        async with session:
+            await session.send("hi")
+        assert session.session_id == "sess-1"
+
+    async def test_a_pinned_id_survives_a_differing_result_message(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        created: list[FakeClient] = []
+
+        def factory(options: ClaudeAgentOptions) -> Any:
+            client = FakeClient(options, [["Hello."]])
+            created.append(client)
+            return client
+
+        pinned = "11111111-2222-3333-4444-555555555555"
+        session = DiscoverySession(
+            client_factory=factory,
+            skills=SKILLS,
+            match_fn=FakeMatcher(),
+            assess_fn=FakeAssessor(),
+            session_id=pinned,
+        )
+        async with session:
+            await session.send("hi")
+
+        assert created[0].options.session_id == pinned  # the SDK was told which id to use
+        assert session.session_id == pinned
+        assert session.to_dict()["session_id"] == pinned
+        assert "session.id_mismatch" in caplog.text

@@ -22,6 +22,8 @@ from blueprint.discovery import DEFAULT_MODEL
 from blueprint.orchestrator import DEFAULT_IDLE_TIMEOUT_S
 
 DEFAULT_BUDGET_USD: Final = 3.0
+DEFAULT_SESSION_IDLE_S: Final = 900.0
+DEFAULT_CORS_ORIGINS: Final = "http://localhost:3000"
 
 
 class SettingsError(ValueError):
@@ -44,6 +46,10 @@ class Settings:
     completeness_check: bool
     checker_model: str
     build_budget_usd: float
+    admin_token: str | None
+    """Bearer token for reviewer/admin/build endpoints; ``None`` leaves them open (local dev)."""
+    session_idle_s: float
+    cors_origins: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
         """Loggable view: presence of secrets, never their values."""
@@ -59,6 +65,9 @@ class Settings:
             "completeness_check": self.completeness_check,
             "checker_model": self.checker_model,
             "build_budget_usd": self.build_budget_usd,
+            "admin_token_set": self.admin_token is not None,
+            "session_idle_s": self.session_idle_s,
+            "cors_origins": list(self.cors_origins),
         }
 
 
@@ -137,5 +146,12 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         checker_model=env.get("BLUEPRINT_CHECKER_MODEL", "").strip() or DEFAULT_CHECKER_MODEL,
         build_budget_usd=_float(
             env, "BLUEPRINT_BUILD_BUDGET_USD", DEFAULT_BUILD_BUDGET_USD, minimum=0.1
+        ),
+        admin_token=_secret(env, "BLUEPRINT_ADMIN_TOKEN"),
+        session_idle_s=_float(env, "BLUEPRINT_SESSION_IDLE_S", DEFAULT_SESSION_IDLE_S, minimum=30),
+        cors_origins=tuple(
+            o.strip()
+            for o in env.get("BLUEPRINT_CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+            if o.strip()
         ),
     )

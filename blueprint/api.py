@@ -1,0 +1,639 @@
+"""HTTP layer over the pipeline: sessions, streaming turns, review, resume, build.
+
+Three audiences, three surfaces, as CLAUDE.md requires:
+
+- **Requester** (``/sessions/...``): plain language only. The SSE stream carries text deltas,
+  an anonymous ``activity`` ping (never a tool name), and a ``done`` summary. Status exposes
+  progress, never categories, risk, or classifier output.
+- **Reviewer** (``/reviews/...``): the compiled spec with risk flags, and decisions.
+- **Admin** (``/admin/...``, ``/builds/...``): the full trace and builds.
+
+Reviewer and admin surfaces require a bearer token when ``BLUEPRINT_ADMIN_TOKEN`` is set.
+
+Sessions live in this process (each owns an SDK subprocess); the snapshot is saved to the
+``RunStore`` after every turn and decision, so a reviewer can read a live conversation and a
+closed session can be resumed from disk. An idle sweeper closes abandoned subprocesses.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+import os
+import time
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Final, Literal
+
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from blueprint.builder import (
+    PROTOTYPES_DIR,
+    BuildResult,
+    UnsupportedOutputFormatError,
+    build_prototype,
+    select_template,
+)
+from blueprint.observability import configure_logging
+from blueprint.orchestrator import (
+    MAX_USER_TEXT_CHARS,
+    DepartmentsMatched,
+    DiscoverySession,
+    SessionNotStartedError,
+    TextDelta,
+    ToolCallStarted,
+    TurnCompleted,
+    TurnEvent,
+)
+from blueprint.review import (
+    DiscoverySpec,
+    ReviewAction,
+    ReviewDecision,
+    SpecSummaryError,
+    compile_spec,
+    review_status,
+    summarize_spec,
+)
+from blueprint.settings import Settings, load_settings
+from blueprint.skills import DepartmentSkill, load_skills
+from blueprint.store import FileRunStore, RunNotFoundError, RunStore, validate_session_id
+from blueprint.websearch import TavilyClient
+
+logger = logging.getLogger(__name__)
+
+SessionFactory = Callable[[Settings, dict[str, Any] | None, str | None], DiscoverySession]
+BuildFn = Callable[..., Awaitable[BuildResult]]
+
+IDLE_SWEEP_INTERVAL_S: Final = 30.0
+LOG_FILE: Final = Path("logs") / "api.jsonl"
+
+
+# -- request / response models (validation at the HTTP boundary) ------------------------------
+
+
+class MessageIn(BaseModel):
+    """A stakeholder message."""
+
+    text: str = Field(min_length=1, max_length=MAX_USER_TEXT_CHARS)
+
+
+class SessionCreated(BaseModel):
+    """Response to ``POST /sessions``."""
+
+    session_id: str
+
+
+class SessionStatus(BaseModel):
+    """Requester-safe view of a session. No categories, risk, or classifier detail."""
+
+    session_id: str
+    live: bool
+    turn: int
+    is_complete: bool
+    ready_for_review: bool
+    review_status: Literal["pending", "approved", "rejected", "sent_back"]
+    build_status: Literal["none", "running", "ok", "failed"]
+    outcome: str | None = Field(
+        default=None,
+        description="Plain-language note for the requester once there is an outcome.",
+    )
+
+
+class DecisionIn(BaseModel):
+    """A reviewer's decision."""
+
+    action: ReviewAction
+    reviewer: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=4000)
+
+
+class QueueItem(BaseModel):
+    """One row of the reviewer's queue."""
+
+    session_id: str
+    title: str
+    risk_level: str
+    needs_extra_scrutiny: bool
+    review_status: str
+    turns: int
+    ready_for_review: bool
+    live: bool
+
+
+class BuildStatus(BaseModel):
+    """State of the build for a session."""
+
+    session_id: str
+    status: Literal["none", "running", "ok", "failed"]
+    result: dict[str, Any] | None = None
+
+
+# -- in-process session registry --------------------------------------------------------------
+
+
+@dataclass
+class LiveSession:
+    """A running session plus the bookkeeping the API needs around it."""
+
+    session: DiscoverySession
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    last_used: float = field(default_factory=time.monotonic)
+
+    def touch(self) -> None:
+        """Mark activity for the idle sweeper."""
+        self.last_used = time.monotonic()
+
+
+class Registry:
+    """Live sessions keyed by id, with an idle timeout that closes abandoned subprocesses."""
+
+    def __init__(self, idle_s: float) -> None:
+        self.idle_s = idle_s
+        self._live: dict[str, LiveSession] = {}
+
+    def get(self, session_id: str) -> LiveSession | None:
+        """The live session, or ``None`` if not running."""
+        return self._live.get(session_id)
+
+    def add(self, session_id: str, session: DiscoverySession) -> LiveSession:
+        """Register a started session."""
+        live = LiveSession(session=session)
+        self._live[session_id] = live
+        return live
+
+    async def close(self, session_id: str) -> bool:
+        """Close and forget a live session; ``False`` if it was not live."""
+        live = self._live.pop(session_id, None)
+        if live is None:
+            return False
+        await live.session.close()
+        return True
+
+    async def sweep(self) -> list[str]:
+        """Close sessions idle longer than ``idle_s``; return their ids."""
+        now = time.monotonic()
+        stale = [sid for sid, live in self._live.items() if now - live.last_used > self.idle_s]
+        for sid in stale:
+            logger.info("api.session.idle_closed", extra={"session_id": sid})
+            await self.close(sid)
+        return stale
+
+    async def close_all(self) -> None:
+        """Shutdown: close every subprocess."""
+        for sid in list(self._live):
+            await self.close(sid)
+
+    @property
+    def ids(self) -> list[str]:
+        """Ids of live sessions."""
+        return list(self._live)
+
+
+# -- app factory ------------------------------------------------------------------------------
+
+
+def default_session_factory(
+    settings: Settings, snapshot: dict[str, Any] | None, session_id: str | None
+) -> DiscoverySession:
+    """Build a real session from settings (mirrors the CLI)."""
+    search = (
+        TavilyClient(settings.tavily_api_key)
+        if settings.web_search_enabled and settings.tavily_api_key
+        else None
+    )
+    return DiscoverySession(
+        model=settings.model,
+        classifier_model=settings.classifier_model,
+        max_budget_usd=settings.max_budget_usd,
+        idle_timeout_s=settings.idle_timeout_s,
+        web_search=search,
+        sop_grounding=settings.sop_grounding,
+        completeness_check=settings.completeness_check,
+        checker_model=settings.checker_model,
+        snapshot=snapshot,
+        session_id=session_id,
+    )
+
+
+def create_app(
+    settings: Settings,
+    *,
+    session_factory: SessionFactory = default_session_factory,
+    store: RunStore | None = None,
+    build_fn: BuildFn = build_prototype,
+    skills: dict[str, DepartmentSkill] | None = None,
+    prototypes_dir: Path = PROTOTYPES_DIR,
+) -> FastAPI:
+    """Assemble the application. Everything with side effects is injectable for tests."""
+    run_store: RunStore = store if store is not None else FileRunStore(Path("runs"))
+    loaded_skills = skills if skills is not None else load_skills()
+    registry = Registry(idle_s=settings.session_idle_s)
+    builds: dict[str, BuildStatus] = {}
+    # Background tasks are strongly referenced until they finish: the event loop only holds a
+    # weak reference, so a task that nothing keeps can be garbage-collected mid-run.
+    background: set[asyncio.Task[None]] = set()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        async def sweeper() -> None:
+            while True:
+                await asyncio.sleep(IDLE_SWEEP_INTERVAL_S)
+                with contextlib.suppress(Exception):
+                    await registry.sweep()
+
+        task = asyncio.create_task(sweeper())
+        try:
+            yield
+        finally:
+            task.cancel()
+            await registry.close_all()
+
+    app = FastAPI(title="Blueprint AI", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors_origins),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.state.registry = registry
+    app.state.store = run_store
+
+    # -- auth -----------------------------------------------------------------------------
+
+    def require_admin(request: Request) -> None:
+        if settings.admin_token is None:
+            return
+        header = request.headers.get("authorization", "")
+        if header != f"Bearer {settings.admin_token}":
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "admin token required")
+
+    admin = Depends(require_admin)
+
+    # -- helpers --------------------------------------------------------------------------
+
+    def _sid(session_id: str) -> str:
+        try:
+            return validate_session_id(session_id)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    def _snapshot(session_id: str) -> dict[str, Any]:
+        live = registry.get(session_id)
+        if live is not None:
+            return live.session.to_dict()
+        try:
+            return run_store.load(session_id)
+        except RunNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session") from exc
+
+    def _persist(session: DiscoverySession) -> None:
+        run_store.save(session.to_dict())
+
+    def _build_status(session_id: str, snapshot: dict[str, Any]) -> BuildStatus:
+        if session_id in builds:
+            return builds[session_id]
+        stored = snapshot.get("build")
+        if stored:
+            return BuildStatus(
+                session_id=session_id, status="ok" if stored.get("ok") else "failed", result=stored
+            )
+        return BuildStatus(session_id=session_id, status="none")
+
+    def _status(session_id: str, snapshot: dict[str, Any]) -> SessionStatus:
+        rstatus = snapshot.get("review_status", "pending")
+        build = _build_status(session_id, snapshot)
+        outcome: str | None = None
+        if build.status == "ok":
+            outcome = "A small illustrative prototype is ready for you to try."
+        elif rstatus == "approved":
+            outcome = "Your request was approved and a prototype is being prepared."
+        elif rstatus == "rejected":
+            outcome = "A reviewer decided not to proceed with this request."
+        elif rstatus == "sent_back":
+            outcome = "A reviewer has a follow-up question; reopen the conversation to answer it."
+        elif snapshot.get("is_ready_for_review"):
+            outcome = "Thanks, a reviewer will look at this before anything is built."
+        return SessionStatus(
+            session_id=session_id,
+            live=registry.get(session_id) is not None,
+            turn=int(snapshot.get("turn", 0)),
+            is_complete=bool(snapshot.get("is_complete")),
+            ready_for_review=bool(snapshot.get("is_ready_for_review")),
+            review_status=rstatus,
+            build_status=build.status,
+            outcome=outcome,
+        )
+
+    async def _open(session_id: str) -> LiveSession:
+        """Return the live session, restoring it from the store if needed."""
+        live = registry.get(session_id)
+        if live is not None:
+            return live
+        try:
+            snapshot = run_store.load(session_id)
+        except RunNotFoundError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session") from exc
+        session = session_factory(settings, snapshot, None)
+        await session.start()
+        return registry.add(session_id, session)
+
+    def _sse(event: str, data: dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    async def _stream_turn(
+        session_id: str, live: LiveSession, events: AsyncIterator[TurnEvent]
+    ) -> AsyncIterator[str]:
+        """Translate orchestrator events into the requester-safe SSE vocabulary."""
+        try:
+            async for event in events:
+                match event:
+                    case TextDelta(text=chunk):
+                        yield _sse("text", {"text": chunk})
+                    case ToolCallStarted():
+                        yield _sse("activity", {})  # never the tool name
+                    case DepartmentsMatched():
+                        pass  # admin trace only
+                    case TurnCompleted(result=result):
+                        _persist(live.session)
+                        yield _sse(
+                            "done",
+                            {
+                                "turn": result.turn,
+                                "is_complete": live.session.is_complete,
+                                "ready_for_review": live.session.is_ready_for_review,
+                                "error": result.errors[0] if result.is_error else None,
+                            },
+                        )
+        except SessionNotStartedError as exc:
+            yield _sse("error", {"message": str(exc)})
+        finally:
+            live.touch()
+            live.lock.release()
+
+    # -- requester surface ----------------------------------------------------------------
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {"ok": True, "live_sessions": len(registry.ids)}
+
+    @app.post("/sessions", response_model=SessionCreated, status_code=status.HTTP_201_CREATED)
+    async def create_session() -> SessionCreated:
+        session_id = str(uuid.uuid4())
+        session = session_factory(settings, None, session_id)
+        await session.start()
+        registry.add(session_id, session)
+        logger.info("api.session.created", extra={"session_id": session_id})
+        return SessionCreated(session_id=session_id)
+
+    @app.post("/sessions/{session_id}/messages")
+    async def send_message(session_id: str, body: MessageIn) -> StreamingResponse:
+        session_id = _sid(session_id)
+        live = await _open(session_id)
+        if live.lock.locked():
+            raise HTTPException(status.HTTP_409_CONFLICT, "a turn is already in progress")
+        await live.lock.acquire()
+        return StreamingResponse(
+            _stream_turn(session_id, live, live.session.stream(body.text)),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/sessions/{session_id}/resume")
+    async def resume_session(session_id: str) -> StreamingResponse:
+        """Reopen a session. If a reviewer sent it back, their question is delivered now."""
+        session_id = _sid(session_id)
+        live = await _open(session_id)
+        session = live.session
+        pending = [d for d in session.reviews if d.action is ReviewAction.SEND_BACK][-1:]
+        if session.review_status != "sent_back" or not pending:
+            # Nothing to deliver: the session is simply reopened. Answer in the same SSE
+            # vocabulary so the client has one code path for both cases.
+            async def nothing() -> AsyncIterator[str]:
+                yield _sse(
+                    "done",
+                    {
+                        "turn": session.turn,
+                        "is_complete": session.is_complete,
+                        "ready_for_review": session.is_ready_for_review,
+                        "error": None,
+                    },
+                )
+
+            return StreamingResponse(nothing(), media_type="text/event-stream")
+        if live.lock.locked():
+            raise HTTPException(status.HTTP_409_CONFLICT, "a turn is already in progress")
+        await live.lock.acquire()
+        return StreamingResponse(
+            _stream_turn(session_id, live, session.stream_reviewer_note(pending[0].note)),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.get("/sessions/{session_id}", response_model=SessionStatus)
+    async def get_session(session_id: str) -> SessionStatus:
+        session_id = _sid(session_id)
+        return _status(session_id, _snapshot(session_id))
+
+    @app.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def close_session(session_id: str) -> None:
+        session_id = _sid(session_id)
+        live = registry.get(session_id)
+        if live is not None:
+            _persist(live.session)
+        if not await registry.close(session_id) and not run_store.exists(session_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown session")
+
+    # -- reviewer surface -----------------------------------------------------------------
+
+    def _compiled(session_id: str, snap: dict[str, Any]) -> DiscoverySpec:
+        """Compile the spec for a snapshot, reusing a stored title/narrative when present."""
+        stored = snap.get("spec")
+        version = len(snap.get("reviews", [])) + 1
+        try:
+            return compile_spec(
+                snap,
+                loaded_skills,
+                version=version,
+                title=stored["title"] if stored else None,
+                narrative=stored["narrative"] if stored else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    @app.get("/reviews", response_model=list[QueueItem], dependencies=[admin])
+    async def review_queue() -> list[QueueItem]:
+        items: list[QueueItem] = []
+        seen: set[str] = set()
+        for sid in [*registry.ids, *run_store.ids()]:
+            if sid in seen:
+                continue
+            seen.add(sid)
+            snap = _snapshot(sid)
+            if not snap.get("is_complete"):
+                continue
+            spec = _compiled(sid, snap)
+            items.append(
+                QueueItem(
+                    session_id=sid,
+                    title=spec.title,
+                    risk_level=spec.risk.level.value,
+                    needs_extra_scrutiny=spec.risk.needs_extra_scrutiny,
+                    review_status=snap.get("review_status", "pending"),
+                    turns=int(snap.get("turn", 0)),
+                    ready_for_review=bool(snap.get("is_ready_for_review")),
+                    live=registry.get(sid) is not None,
+                )
+            )
+        return items
+
+    @app.get("/reviews/{session_id}", dependencies=[admin])
+    async def get_review(session_id: str, summarize: bool = False) -> dict[str, Any]:
+        session_id = _sid(session_id)
+        snap = _snapshot(session_id)
+        spec = _compiled(session_id, snap)
+        if summarize and not snap.get("spec"):
+            try:
+                title, narrative = await summarize_spec(spec.categories, model=settings.model)
+                spec = compile_spec(
+                    snap, loaded_skills, version=spec.version, title=title, narrative=narrative
+                )
+            except SpecSummaryError as exc:
+                logger.warning("api.review.summarize_failed", extra={"error": str(exc)})
+        return {
+            "spec": spec.to_dict(),
+            "review_status": snap.get("review_status", "pending"),
+            "reviews": snap.get("reviews", []),
+        }
+
+    @app.post("/reviews/{session_id}/decision", dependencies=[admin])
+    async def decide(session_id: str, body: DecisionIn) -> dict[str, Any]:
+        session_id = _sid(session_id)
+        snap = _snapshot(session_id)
+        spec = _compiled(session_id, snap)
+        try:
+            decision = ReviewDecision(
+                action=body.action,
+                reviewer=body.reviewer,
+                note=body.note,
+                spec_version=spec.version,
+                risk_level=spec.risk.level,
+            )
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+        live = registry.get(session_id)
+        if live is not None:
+            live.session.record_review(decision)
+            snap = live.session.to_dict()
+        else:
+            decisions = [ReviewDecision.from_dict(d) for d in snap.get("reviews", [])]
+            decisions.append(decision)
+            snap["reviews"] = [d.to_dict() for d in decisions]
+            snap["review_status"] = review_status(decisions)
+        snap["spec"] = spec.to_dict()
+        run_store.save(snap)
+        logger.info(
+            "api.review.decision",
+            extra={
+                "session_id": session_id,
+                "action": body.action.value,
+                "reviewer": body.reviewer,
+                "spec_version": spec.version,
+            },
+        )
+        return {"review_status": snap["review_status"], "spec_version": spec.version}
+
+    # -- admin surface --------------------------------------------------------------------
+
+    @app.get("/admin/sessions/{session_id}/trace", dependencies=[admin])
+    async def trace(session_id: str) -> dict[str, Any]:
+        session_id = _sid(session_id)
+        return _snapshot(session_id)
+
+    @app.post(
+        "/builds/{session_id}",
+        response_model=BuildStatus,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[admin],
+    )
+    async def start_build(session_id: str, force: bool = False) -> BuildStatus:
+        """Start the Builder for an approved session.
+
+        A build costs real money and overwrites its workspace, so this is deliberately not
+        idempotent-by-rebuilding: a request while one is in flight returns that run, and a
+        request against a finished build is refused unless ``force`` says to redo it.
+        """
+        session_id = _sid(session_id)
+        snap = _snapshot(session_id)
+        if snap.get("review_status") != "approved":
+            raise HTTPException(status.HTTP_409_CONFLICT, "session is not approved")
+        current = _build_status(session_id, snap)
+        if current.status == "running":
+            return current
+        if current.status != "none" and not force:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"this session was already built ({current.status}); pass force=true to rebuild",
+            )
+        spec = _compiled(session_id, snap)
+        try:
+            select_template(spec)
+        except UnsupportedOutputFormatError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+        builds[session_id] = BuildStatus(session_id=session_id, status="running")
+
+        async def run() -> None:
+            try:
+                result = await build_fn(
+                    spec,
+                    workspace=prototypes_dir / session_id,
+                    model=settings.model,
+                    max_budget_usd=settings.build_budget_usd,
+                )
+                latest = _snapshot(session_id)
+                latest["build"] = result.to_dict()
+                run_store.save(latest)
+                builds[session_id] = BuildStatus(
+                    session_id=session_id,
+                    status="ok" if result.ok else "failed",
+                    result=result.to_dict(),
+                )
+            except Exception as exc:  # a build must never take the API down
+                logger.exception("api.build.crashed", extra={"session_id": session_id})
+                builds[session_id] = BuildStatus(
+                    session_id=session_id, status="failed", result={"error": str(exc)}
+                )
+
+        task = asyncio.create_task(run())
+        background.add(task)
+        task.add_done_callback(background.discard)
+        return builds[session_id]
+
+    @app.get("/builds/{session_id}", response_model=BuildStatus, dependencies=[admin])
+    async def get_build(session_id: str) -> BuildStatus:
+        session_id = _sid(session_id)
+        return _build_status(session_id, _snapshot(session_id))
+
+    return app
+
+
+def app_from_env() -> FastAPI:
+    """Entry point for ``uvicorn blueprint.api:app_from_env --factory``.
+
+    Reads ``.env`` and validates settings here, so a misconfigured deployment fails at
+    startup with a plain message rather than on a stakeholder's first message.
+    """
+    load_dotenv()
+    configure_logging(LOG_FILE)
+    settings = load_settings(os.environ)
+    logger.info("api.starting", extra=settings.to_dict())
+    return create_app(settings)

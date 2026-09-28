@@ -92,6 +92,24 @@ class TestCompleteness:
         assert s.completeness_check is False and s.checker_model == "claude-sonnet-5"
 
 
+class TestApi:
+    def test_defaults(self) -> None:
+        s = load_settings(API)
+        assert s.admin_token is None and s.session_idle_s == 900
+        assert s.cors_origins == ("http://localhost:3000",)
+
+    def test_overrides_and_no_token_leak(self) -> None:
+        s = load_settings(
+            {
+                **API,
+                "BLUEPRINT_ADMIN_TOKEN": "tok-secret",
+                "BLUEPRINT_CORS_ORIGINS": "http://a, http://b",
+            }
+        )
+        assert s.admin_token == "tok-secret" and s.cors_origins == ("http://a", "http://b")
+        assert "tok-secret" not in str(s.to_dict()) and s.to_dict()["admin_token_set"] is True
+
+
 class TestNoSecretLeak:
     def test_to_dict_never_contains_secret_values(self) -> None:
         s = load_settings({**API, "TAVILY_API_KEY": "tvly-secret"})
