@@ -48,9 +48,11 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-28 | 10 | Admin view: every session including unfinished ones, the full trace behind each (classification, canvas versions, per-turn tool calls and verdicts, denied searches, feedback, decisions, build report), build controls behind the gate, and the recorded eval runs as a table. New `blueprint/eval_runs.py` reads what the harness writes. | `8edbcbc` |
 
-State at last update: 348 tests, ruff + mypy `--strict` clean, steps 1–10 of 13 complete plus
-hardening and web search. All three UI surfaces exist. Next: step 11 (eval harness), which is
-where the dashboard built this step gets more than one suite to show.
+| 2026-09-28 | 11 | Shared eval harness plus two suites. `risk_gate`: 18 labeled canvases, deterministic, free — found three flags that were not firing at all. `completeness`: 21 labeled captures across three models, settling the checker-model question deferred since step 4. Both appear in the dashboard without it changing. | `b551e91` |
+
+State at last update: 359 tests, ruff + mypy `--strict` clean, steps 1–11 of 13 complete plus
+hardening and web search. Two of CLAUDE.md's four eval measures are built; the two that need a
+stakeholder simulator are still open (see Deferred). Next: step 12 (audit logging + SQLite).
 
 ---
 
@@ -523,6 +525,43 @@ resume bug, in a run that predates the fix. The trace shows both numbers rather 
 reconciling them. A debugging surface that quietly papers over inconsistency is worth less
 than one that displays it.
 
+### Two lists that must agree should be one list
+`named_integration` derived its system names from the department skills. `writes_to_system`
+matched against a hand-written literal list of nouns. They started aligned and drifted until
+74 named systems and 8 generic types were visible to one rule and invisible to the other — so
+a spec that wrote into BambooHR was shown as `elevated` rather than `high`. The fix was not a
+longer literal list; it was deriving both from the same source so they cannot diverge again.
+A unit test now asserts the containment directly, because the next drift would be just as
+silent. *`blueprint/review.py` `_write_targets`*
+
+### One flag can hide another's failure
+Three rules had recall 0.00 and nothing had noticed, because every case that should have
+raised them *also* raised `named_integration`, which reached the same risk level. The
+composite answer was right while two of its inputs were dead. Suites therefore need cases that
+isolate each rule — a flag on its own, with nothing else to cover for it — not just realistic
+cases that happen to exercise several at once.
+
+### The eval is allowed to correct the labels, and allowed to correct the code
+Of the disagreements in the first risk-gate run, four were the code being wrong and three were
+my labels being wrong: I had assumed `needs_extra_scrutiny` was reserved for named
+integrations when it is simply `level >= elevated`. The skill-matching suite set the precedent
+in step 2 by relabeling `hr_onboarding_packets` when both models disagreed with the label.
+What makes either direction honest is that every case carries a `note` with its rationale, so
+a disagreement is settled by reading rather than by whoever edits the file.
+
+### "Smaller model, cheaper" is a hypothesis, not a fact
+Haiku 4.5 on the completeness checker cost **the same as Opus** ($0.0070 vs $0.0069) and took
+3.5x longer, with a p95 of 24.7 seconds inside a tool call. Structured output against a rubric
+is not the workload where a small model saves money. The benchmark existed to check the
+assumption and the assumption was wrong — which is the entire value of having run it.
+
+### Pick the metric before running, and pick it by consequence
+Every suite here names one headline number chosen from what the failure costs, not from what
+is easy to compute. The risk gate's is the scrutiny false negative, because a false positive
+costs a reviewer thirty seconds and a false negative is an unreviewed build. The checker's is
+the missed gap, because an invented gap merely annoys. Both suites report the opposite
+direction too — the point is knowing which one decides.
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -555,6 +594,9 @@ project rules were added. "It's configured" is not evidence.
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 | The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| Three risk rules had not fired for anyone, ever, and the unit tests passed the whole time. The tests exercised each rule with a sentence built to match its regex; nothing checked the regex against the vocabulary the rest of the system actually uses. | A test written from the implementation tests the implementation. The labeled cases were written from the *problem* — "a stakeholder says they write into BambooHR" — and that is what found it. Both are worth having; only one of them would have caught this. |
+| `p95` indexed with `int(0.95 * n)`, so at n=2 it returned the smaller value and p95 came back below p50. Spotted in a two-call smoke run, not in the metrics code. | A number that is impossible on its face — p95 under p50 — is the cheapest kind of bug to catch and the easiest to scroll past. Sanity-check the harness on a tiny input before trusting it on a big one. |
+| Hit the same YAML trap twice in one sitting: an unquoted scalar containing `": "`, then one starting with a quote character. Fixed the first by hand and did not sweep for the second. | When a class of bug shows up once in authored data, sweep the whole file class immediately. The sweep took four lines and found the second instance I had already written. |
 | Typed the admin trace as if every snapshot key were guaranteed, then watched the page crash on a step-6 run with no `feedback` key. Twelve keys drift across the runs on disk; the first one I opened happened to be the one that broke. | Data that has been written by more than one version of the program has more than one shape. Survey what is actually stored before writing the reader — one script over `runs/*.json` listed every drifting key in seconds, after the crash rather than before. |
 | Bound `root: Path = EVALS_DIR` as a default argument, so the module attribute could never be overridden — including by the test that was meant to point it at a tmp_path. The test read the real evals directory instead and failed with a confusing KeyError. | A default argument is evaluated once, at import. Anything meant to be overridable is read at call time. The failure looked like a bad assertion and was really a binding-time bug. |
 | `compile_spec`'s title fallback took `turns[0]["user_text"]` with no origin filter, so a spec whose first surviving turn was a send-back got titled with the reviewer's private note. Spotted by reading the first real queue I rendered. | The same leak I had already fixed once, in a second place. After fixing a boundary, grep for every other reader of the same field — `user_text` had two consumers and I patched one. |
@@ -570,6 +612,17 @@ project rules were added. "It's configured" is not evidence.
 
 ## Deferred and open
 
+- **Two of CLAUDE.md's four eval measures are not built.** `risk_gate` covers the
+  false-negative check and `completeness` covers per-category capture quality. Still missing:
+  (a) **discovery completeness end to end** — were all seven categories actually captured over
+  a whole conversation — and (b) **example relevance** and the **rubric-scored judge
+  comparison of a compiled spec against a gold one** (completeness / accuracy / actionability,
+  never an overall score). Both need a *stakeholder simulator*: a second model playing the
+  requester from a persona brief, because fixed reply scripts break as soon as the agent
+  adapts its questions. Estimated ~$0.30 per case for the conversation plus judge, so a 20-case
+  run is $6–8 — a real decision rather than a default, which is why it is here and not done.
+- **Requester 👍/👎 as judge-validation labels** (the step 8 plan) needs enough real feedback
+  to be worth anything. Two ratings exist so far.
 - **`/admin` has no authentication either**, and it is the surface with the full trace on it:
   stakeholder text verbatim, costs, classifier rationales. The same SSO note applies, more
   urgently than for `/review`.
