@@ -50,9 +50,12 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-28 | 11 | Shared eval harness plus two suites. `risk_gate`: 18 labeled canvases, deterministic, free — found three flags that were not firing at all. `completeness`: 21 labeled captures across three models, settling the checker-model question deferred since step 4. Both appear in the dashboard without it changing. | `b551e91` |
 
-State at last update: 359 tests, ruff + mypy `--strict` clean, steps 1–11 of 13 complete plus
-hardening and web search. Two of CLAUDE.md's four eval measures are built; the two that need a
-stakeholder simulator are still open (see Deferred). Next: step 12 (audit logging + SQLite).
+| 2026-09-28 | — | Real sign-in in front of `/review` and `/admin`: scrypt passwords, HMAC session cookies, roles, and `proxy.ts` as the single gate. Fails closed. Closes the deferred auth gap from steps 9 and 10. | `ab83320` |
+| 2026-09-28 | 12 | SQLite behind the existing `RunStore` protocol, an append-only `audit_events` table, redaction at write, and retention. 12 runs migrated with 96 derived events. No route changed. | `aac4f26` |
+
+State at last update: 434 tests, ruff + mypy `--strict` clean, steps 1–12 of 13 complete plus
+hardening, web search and auth. Next: step 13 (README, architecture diagram, demo clip) — and
+the architecture has now stopped moving, which is why it is next.
 
 ---
 
@@ -562,6 +565,52 @@ costs a reviewer thirty seconds and a false negative is an unreviewed build. The
 the missed gap, because an invented gap merely annoys. Both suites report the opposite
 direction too — the point is knowing which one decides.
 
+### An abstraction earns its keep on the day you swap it
+`RunStore` was a Protocol with one implementation for five steps, which is exactly when an
+abstraction looks like overhead. Swapping in SQLite changed one function — which store
+`create_app` builds — and no route, no handler and no test assertion. What did change was
+caught by the type checker, not by a failing test: `MemoryStore` in the test suite stopped
+satisfying the protocol the moment it grew two methods, and mypy said so before anything ran.
+*`blueprint/store.py`, `blueprint/api.py` `_default_store`*
+
+### Current state and history are different tables
+A snapshot is overwritten every turn; an audit event happened and never changes. Putting "who
+approved this" in the snapshot means the next approval erases the last one. Keeping them apart
+is why the trail can show `send_back` *then* `approve` while the spec shows only the current
+status — and there is a test asserting a save does not disturb the events.
+
+### Derive the machine's story, record the human's as it happens
+Human decisions are written when they occur, with the authenticated account attached, because
+"who" exists only at that moment. The agent's steps are derived from the snapshot on save,
+because the snapshot already *is* the record of what the agent did — double-writing would
+create two sources that can disagree. The payoff showed up in the migration: 12 runs that
+predate the audit table got 96 events derived from their snapshots, so history does not begin
+at whenever the feature landed. *`blueprint/store.py` `build_events`*
+
+### A redactor should be honest about being a filter, not a guarantee
+It catches what has a mechanical shape — emails, phone numbers, SSNs, card and account
+numbers — and leaves prose alone. A regex chasing names would either miss most of them or
+shred the conversation. The tests assert both directions, and the second one matters more
+than it looks: "30 to 40 new hires a month" and "20-30 minutes each" must survive, because a
+store that eats the answer to *how many* and *how often* has destroyed the canvas to protect
+a phone number. The module says what it does not do rather than implying coverage.
+
+### A precise type that nobody can use is not precision
+Typed the redactor's walker as a fully recursive `Json` union. Correct, and it produced 66
+errors at call sites, because every caller then had to narrow a union before indexing. The
+fix was to keep the recursive alias *inside* the walker and type the public function as what
+callers actually hold — a snapshot dict. Precision belongs where it constrains the tricky
+code, not where it taxes every reader.
+
+### Auth: a gate, not a check per route
+`proxy.ts` decides once for `/review`, `/admin` and their API trees. A new admin route is
+protected by *existing*, not by someone remembering — the same instinct as `test_isolation.py`
+scanning every `ClaudeAgentOptions(`. The decision handler checks again anyway, because a
+handler that assumes a gate in front of it breaks quietly the day the matcher is edited.
+**Fail closed:** with no session secret or no accounts, every protected route is refused.
+The tempting default is to stay open until configured, which is how a staging box ends up
+public. *`frontend/proxy.ts`, `frontend/lib/server/auth.ts`*
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -594,6 +643,9 @@ project rules were added. "It's configured" is not evidence.
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 | The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| Broke `cli.py` by putting an escape sequence through a shell heredoc — the fourth or fifth time, and there is already a rule in this log saying not to. | The rule was right and I did not follow it. Escapes go through the editor tool. Writing a rule down is not the same as having internalised it, and the tell is that this entry could have been copied from the earlier one. |
+| Let `ruff --fix` strip imports I had just added but not yet referenced, then watched F821 fire on the code that used them a minute later. | Auto-fix acts on the file as it is, not on the file as intended. Add the import and its first use in the same edit, or run the formatter after the code is complete rather than between two halves of one change. |
+| A regex meant to insert three fields after `cors_origins=` matched `cors_origins=tuple(`, which spans lines, and injected them into the middle of a generator expression. | Anchoring on the start of a multi-line expression is anchoring on nothing. For structured edits into real code, match the whole expression or use the editor tool. |
 | Three risk rules had not fired for anyone, ever, and the unit tests passed the whole time. The tests exercised each rule with a sentence built to match its regex; nothing checked the regex against the vocabulary the rest of the system actually uses. | A test written from the implementation tests the implementation. The labeled cases were written from the *problem* — "a stakeholder says they write into BambooHR" — and that is what found it. Both are worth having; only one of them would have caught this. |
 | `p95` indexed with `int(0.95 * n)`, so at n=2 it returned the smaller value and p95 came back below p50. Spotted in a two-call smoke run, not in the metrics code. | A number that is impossible on its face — p95 under p50 — is the cheapest kind of bug to catch and the easiest to scroll past. Sanity-check the harness on a tiny input before trusting it on a big one. |
 | Hit the same YAML trap twice in one sitting: an unquoted scalar containing `": "`, then one starting with a quote character. Fixed the first by hand and did not sweep for the second. | When a class of bug shows up once in authored data, sweep the whole file class immediately. The sweep took four lines and found the second instance I had already written. |
@@ -623,16 +675,16 @@ project rules were added. "It's configured" is not evidence.
   run is $6–8 — a real decision rather than a default, which is why it is here and not done.
 - **Requester 👍/👎 as judge-validation labels** (the step 8 plan) needs enough real feedback
   to be worth anything. Two ratings exist so far.
-- **`/admin` has no authentication either**, and it is the surface with the full trace on it:
-  stakeholder text verbatim, costs, classifier rationales. The same SSO note applies, more
-  urgently than for `/review`.
+- **Auth has no rate limiting.** scrypt makes each attempt expensive, but nothing caps how
+  many attempts `/api/auth` will take. Sessions are 12 hours with no refresh or revocation
+  list, so signing a user out everywhere means rotating `BLUEPRINT_SESSION_SECRET`.
+- **Redaction has never run on text that contained an identifier outside a test.** The
+  synthetic conversations have none, so the migration of all 12 runs redacted nothing. The
+  unit tests cover it against a real SQLite file; a live run has not.
 - **The build button has not been clicked in anger.** The endpoints behind it are tested
   (202, background task, force semantics, crash containment) and the guards were checked live
   through the proxy, but a real build from the UI costs ~$0.46 and was not spent.
-- **`/review` has no authentication.** The httpOnly cookie makes the recorded reviewer name
-  non-forgeable from the page; it does not stop anyone who can reach the app from approving
-  things. SSO in front of the `/review` routes is required before this is deployed anywhere
-  the queue matters. The banner in the UI says so rather than implying otherwise.
+
 - **The requester view has no tests.** The backend it talks to has 321; the React has a
   typechecker and a linter. Every bug in step 8 was found by clicking. Playwright against the
   real API would have caught the sticky-composer overlap and the locked-out composer.
