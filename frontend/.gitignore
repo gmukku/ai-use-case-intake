@@ -40,3 +40,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local accounts (password hashes)
+users.json
+
+# local dev credentials
+.dev-credentials.local
