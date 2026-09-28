@@ -44,9 +44,11 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 | 2026-09-28 | 8a | Next.js 16 scaffold and the requester's conversation view: a typed API client that reads the SSE stream by hand, streaming text with a caret, lazy session creation. Live: two turns streamed into the browser. | `9bcba59` |
 | 2026-09-28 | 8b | `/s/<id>` routing with an in-place URL rewrite, transcript restored from the server, reopen after a send-back, and 👍/👎 feedback (new `blueprint/feedback.py`, two new endpoints). Live: the whole send-back → reopen → answer → re-record loop through the browser. Three bugs found by running it that neither the tests nor the typechecker could see. | `9f50425` |
 
-State at last update: 321 tests, ruff + mypy `--strict` clean, steps 1–8 of 13 complete plus
-hardening and web search. Next: step 9 (reviewer view), which is where the admin token has to
-stop being something the browser could ever hold.
+| 2026-09-28 | 9 | Reviewer view: approval queue with risk badges, the compiled spec with evidence per flag, and approve / send back / reject. The frontend grows a server side — route handlers hold the admin token, `server-only` makes that a build error to get wrong, and reviewer identity moves into an httpOnly cookie. | `d301a9b` |
+
+State at last update: 324 tests, ruff + mypy `--strict` clean, steps 1–9 of 13 complete plus
+hardening and web search. Next: step 10 (admin view — the full trace and the evals dashboard),
+the surface that is for me rather than for whoever submitted the request.
 
 ---
 
@@ -460,6 +462,36 @@ append-only, neither collapsing history — a rating that changed is information
 is a view over the log rather than a replacement for it. Keeping them separate means the
 reviewer surface and the requester surface never have to filter each other's data out.
 
+### A secret the browser must not hold needs a server, not a convention
+The reviewer routes need a bearer token. Any token reachable from browser JavaScript is a
+token anyone can read out of the bundle, so the browser never gets one: it calls same-origin
+route handlers, and those run on the Next server and add the header on the way through. The
+proxy also relays the API's own status codes, so a 409 on an incomplete canvas still reads as
+a 409 rather than a generic failure. *`frontend/lib/server/backend.ts`*
+
+### `import "server-only"` turns a rule into a build error
+The rule "do not import this from a Client Component" is exactly the kind that holds until
+someone is in a hurry. The `server-only` package makes that import fail the build instead.
+Same instinct as `tests/test_isolation.py` source-scanning every `ClaudeAgentOptions(` for
+`env=AGENT_ENV`: when a mistake would be invisible and expensive, make it impossible rather
+than discouraged. **Verified, not assumed:** built the app and grepped `.next/static` for the
+token. Absent. The only hit anywhere was the Turbopack disk cache, which is never served.
+
+### Who did it is the server's answer, not the client's
+The API takes `reviewer` in the decision body, which means whoever calls it decides whose
+name lands in the audit log. The route handler now reads the name from an httpOnly cookie and
+overwrites whatever the body claimed — the page says *what* was decided, the server says
+*who*. Tested by posting a decision with a forged name alongside a valid cookie: the cookie
+won. **What it is not:** authentication. Anyone who can reach the app can set the cookie. It
+makes the recorded name non-forgeable *from the page*, which is worth having and is not the
+same as protecting the queue. *`frontend/lib/server/reviewer.ts`*
+
+### The expensive nicety is a button, not a default
+A model-written spec title costs about a cent. Generating one per queue row would cost that
+on every page load for rows nobody opens. `rewrite title` calls the summarizer on the one
+spec a reviewer is actually reading. Where a feature costs money per use, the default is off
+and the affordance is visible.
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -492,6 +524,8 @@ project rules were added. "It's configured" is not evidence.
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 | The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| `compile_spec`'s title fallback took `turns[0]["user_text"]` with no origin filter, so a spec whose first surviving turn was a send-back got titled with the reviewer's private note. Spotted by reading the first real queue I rendered. | The same leak I had already fixed once, in a second place. After fixing a boundary, grep for every other reader of the same field — `user_text` had two consumers and I patched one. |
+| Chased two blank screenshots on the review page before measuring. `getBoundingClientRect()` said the buttons were at 844px inside a 914px viewport, i.e. fine; the pane's capture was simply unreliable at that scroll position. | Second time this cost me a detour. The rule is now: a blank screenshot is a claim to verify, not an observation. `read_page` and one measurement settle it faster than another guess. |
 | Resuming a session wiped its transcript: `_restore` does not replay turn results, so the next `to_dict()` wrote one turn over ten. Present in the CLI's resume since step 5, found only by reloading a resumed conversation in a browser and seeing nine messages gone. | A partial restore is a decision about the *object*, and silently also a decision about everything that object serializes. The round-trip tests asserted the canvas and the counters survived. Nothing asserted the transcript did. |
 | Offered "a reviewer has a question" forever, because `review_status` stays `sent_back` after the question is asked — and a reload would have put the same question to the requester twice. | The field that names a state is not always the field that answers "is there work left". Derive that from what actually happened, not from the nearest enum. |
 | Then fixed it by swapping the new predicate in everywhere the old one appeared, which disabled the composer and locked the requester out of answering. | One rename, two meanings. When a boolean starts answering a second question, that is a second boolean. |
@@ -503,6 +537,10 @@ project rules were added. "It's configured" is not evidence.
 
 ## Deferred and open
 
+- **`/review` has no authentication.** The httpOnly cookie makes the recorded reviewer name
+  non-forgeable from the page; it does not stop anyone who can reach the app from approving
+  things. SSO in front of the `/review` routes is required before this is deployed anywhere
+  the queue matters. The banner in the UI says so rather than implying otherwise.
 - **The requester view has no tests.** The backend it talks to has 321; the React has a
   typechecker and a linter. Every bug in step 8 was found by clicking. Playwright against the
   real API would have caught the sticky-composer overlap and the locked-out composer.
