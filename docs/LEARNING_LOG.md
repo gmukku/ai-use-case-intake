@@ -46,9 +46,11 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 
 | 2026-09-28 | 9 | Reviewer view: approval queue with risk badges, the compiled spec with evidence per flag, and approve / send back / reject. The frontend grows a server side — route handlers hold the admin token, `server-only` makes that a build error to get wrong, and reviewer identity moves into an httpOnly cookie. | `d301a9b` |
 
-State at last update: 324 tests, ruff + mypy `--strict` clean, steps 1–9 of 13 complete plus
-hardening and web search. Next: step 10 (admin view — the full trace and the evals dashboard),
-the surface that is for me rather than for whoever submitted the request.
+| 2026-09-28 | 10 | Admin view: every session including unfinished ones, the full trace behind each (classification, canvas versions, per-turn tool calls and verdicts, denied searches, feedback, decisions, build report), build controls behind the gate, and the recorded eval runs as a table. New `blueprint/eval_runs.py` reads what the harness writes. | `8edbcbc` |
+
+State at last update: 348 tests, ruff + mypy `--strict` clean, steps 1–10 of 13 complete plus
+hardening and web search. All three UI surfaces exist. Next: step 11 (eval harness), which is
+where the dashboard built this step gets more than one suite to show.
 
 ---
 
@@ -492,6 +494,35 @@ on every page load for rows nobody opens. `rewrite title` calls the summarizer o
 spec a reviewer is actually reading. Where a feature costs money per use, the default is off
 and the affordance is visible.
 
+### A stored format has history, and something has to know it
+The snapshot grew over nine build steps: `match` in step 2, `open_gaps` in step 4, `reviews`
+in step 5, `build` in step 6, `feedback` in step 8, `origin` on turns somewhere between.
+Twelve top-level keys and two turn-level keys are missing from at least one run on disk. The
+snapshots are the audit record, so they are not migrated — the absence is real and stays
+real. One function at the client boundary fills defaults, and nothing downstream has to know.
+An old run showing no Classification section is correct: it genuinely has none.
+*`frontend/lib/admin.ts` `normalize`*
+
+### A TypeScript type on network data is a claim, not a check
+`response.json()` is `any`, so `json<Trace>(...)` asserts a shape rather than verifying one.
+I declared every key required, the compiler believed me, and the page crashed on the first
+older snapshot it met. Reading it as `Partial<Trace>` and normalizing into `Trace` puts the
+compiler back on the right side of the problem: it now refuses to let a missing key through
+unhandled. The Python side has had this right since step 1 — every `from_dict` validates
+rather than assumes.
+
+### Read-only is a design decision, not a missing feature
+The evals panel shows recorded runs and cannot start one. A suite costs real money and takes
+minutes, and a page that can spend money by being clicked will eventually be clicked. The
+command to run one is printed next to the table instead. Same reasoning as `force=true` on a
+rebuild: where an action costs money, the default is off and the affordance is explicit.
+
+### The admin view is where the earlier bugs became visible
+`938bd51e` renders "10 turns" in its header and "Turns (2 stored)" above the list — the step 8
+resume bug, in a run that predates the fix. The trace shows both numbers rather than
+reconciling them. A debugging surface that quietly papers over inconsistency is worth less
+than one that displays it.
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -524,6 +555,8 @@ project rules were added. "It's configured" is not evidence.
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 | The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| Typed the admin trace as if every snapshot key were guaranteed, then watched the page crash on a step-6 run with no `feedback` key. Twelve keys drift across the runs on disk; the first one I opened happened to be the one that broke. | Data that has been written by more than one version of the program has more than one shape. Survey what is actually stored before writing the reader — one script over `runs/*.json` listed every drifting key in seconds, after the crash rather than before. |
+| Bound `root: Path = EVALS_DIR` as a default argument, so the module attribute could never be overridden — including by the test that was meant to point it at a tmp_path. The test read the real evals directory instead and failed with a confusing KeyError. | A default argument is evaluated once, at import. Anything meant to be overridable is read at call time. The failure looked like a bad assertion and was really a binding-time bug. |
 | `compile_spec`'s title fallback took `turns[0]["user_text"]` with no origin filter, so a spec whose first surviving turn was a send-back got titled with the reviewer's private note. Spotted by reading the first real queue I rendered. | The same leak I had already fixed once, in a second place. After fixing a boundary, grep for every other reader of the same field — `user_text` had two consumers and I patched one. |
 | Chased two blank screenshots on the review page before measuring. `getBoundingClientRect()` said the buttons were at 844px inside a 914px viewport, i.e. fine; the pane's capture was simply unreliable at that scroll position. | Second time this cost me a detour. The rule is now: a blank screenshot is a claim to verify, not an observation. `read_page` and one measurement settle it faster than another guess. |
 | Resuming a session wiped its transcript: `_restore` does not replay turn results, so the next `to_dict()` wrote one turn over ten. Present in the CLI's resume since step 5, found only by reloading a resumed conversation in a browser and seeing nine messages gone. | A partial restore is a decision about the *object*, and silently also a decision about everything that object serializes. The round-trip tests asserted the canvas and the counters survived. Nothing asserted the transcript did. |
@@ -537,6 +570,12 @@ project rules were added. "It's configured" is not evidence.
 
 ## Deferred and open
 
+- **`/admin` has no authentication either**, and it is the surface with the full trace on it:
+  stakeholder text verbatim, costs, classifier rationales. The same SSO note applies, more
+  urgently than for `/review`.
+- **The build button has not been clicked in anger.** The endpoints behind it are tested
+  (202, background task, force semantics, crash containment) and the guards were checked live
+  through the proxy, but a real build from the UI costs ~$0.46 and was not spent.
 - **`/review` has no authentication.** The httpOnly cookie makes the recorded reviewer name
   non-forgeable from the page; it does not stop anyone who can reach the app from approving
   things. SSO in front of the `/review` routes is required before this is deployed anywhere
