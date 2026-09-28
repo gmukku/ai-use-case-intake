@@ -53,9 +53,15 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 | 2026-09-28 | — | Real sign-in in front of `/review` and `/admin`: scrypt passwords, HMAC session cookies, roles, and `proxy.ts` as the single gate. Fails closed. Closes the deferred auth gap from steps 9 and 10. | `ab83320` |
 | 2026-09-28 | 12 | SQLite behind the existing `RunStore` protocol, an append-only `audit_events` table, redaction at write, and retention. 12 runs migrated with 96 derived events. No route changed. | `aac4f26` |
 
-State at last update: 434 tests, ruff + mypy `--strict` clean, steps 1–12 of 13 complete plus
-hardening, web search and auth. Next: step 13 (README, architecture diagram, demo clip) — and
-the architecture has now stopped moving, which is why it is next.
+| 2026-09-28 | 13 | README with a verified Mermaid diagram and three real screenshots, an honest-limits section, and `docs/DEMO.md` as a three-minute walkthrough. | `e26fa6d` |
+
+**All 13 build-order steps are complete.** 434 tests, ruff + mypy `--strict` clean, 36 commits.
+~5.9k lines of backend, ~4.6k of tests, ~2.5k of frontend, ~0.9k of evals. Twelve recorded
+conversations cost $1.08 in total.
+
+What is *not* done is listed under Deferred and open below, and in the README's "Honest
+limits". The largest are the two missing eval measures (they need a stakeholder simulator,
+~$6–8 a run), the untested Bedrock path, and the requester view having no automated tests.
 
 ---
 
@@ -611,6 +617,26 @@ handler that assumes a gate in front of it breaks quietly the day the matcher is
 The tempting default is to stay open until configured, which is how a staging box ends up
 public. *`frontend/proxy.ts`, `frontend/lib/server/auth.ts`*
 
+### Write the README when the architecture stops moving, not before
+It was tempting at step 8, when there was something to show. Steps 9 through 12 then added a
+server side to the frontend, real auth, a database and an audit trail — every one of which
+would have invalidated a paragraph. The cost of waiting was nothing; the cost of not waiting
+is a document that quietly lies about its own system.
+
+### An honest-limits section is worth more than the omission
+Four departments, one Builder template, two of four eval measures missing, redaction as a
+filter rather than a guarantee, no rate limiting, no tests on the requester view. A reader
+finds all of that in ten minutes anyway. Saying it first converts a gap someone discovers into
+a judgement they can see was made — and it is the same instinct as the docstrings that say
+what a module does *not* do.
+
+### Verify the diagram renders; do not assume the renderer copes
+The first Mermaid diagram was syntactically valid and visually useless — sprawling, edges
+crossing, unreadable without zooming. Rendering it through mermaid 11 in a browser took two
+minutes and showed both that it parsed *and* that it needed rebuilding as a linear flow. A
+README diagram that needs zooming is not doing its job, and "it's valid syntax" would not have
+caught that.
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -663,6 +689,9 @@ project rules were added. "It's configured" is not evidence.
 ---
 
 ## Deferred and open
+
+Kept as a list rather than quietly dropped. Everything here is a decision, not an oversight —
+the README's "Honest limits" is the reader-facing version of this section.
 
 - **Two of CLAUDE.md's four eval measures are not built.** `risk_gate` covers the
   false-negative check and `completeness` covers per-category capture quality. Still missing:
