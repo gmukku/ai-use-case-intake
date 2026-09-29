@@ -50,7 +50,10 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
-      - run: npx tsc --noEmit
+      # `next typegen` writes PageProps / LayoutProps / RouteContext into .next/types, and
+      # both that directory and next-env.d.ts are gitignored — so a fresh checkout cannot
+      # typecheck without generating them first. `npm run typecheck` does both.
+      - run: npm run typecheck
       - run: npx eslint .
       - run: npm run build
       # The auth core: passwords, session signing, and that a session dies with its account.
