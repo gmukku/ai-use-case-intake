@@ -20,40 +20,40 @@ Updated at every checkpoint (end of a build-order step, or any time a mistake ta
 | Date | Step | What landed | Commit |
 |---|---|---|---|
 | 2026-09-12 | 0 | Environment: uv project, Python 3.12 pinned, `.gitignore` before any key existed, `.env.example` with both auth paths. Two SDK smoke scripts (`examples/`). | — |
-| 2026-09-12 | 1 | Canvas backbone, discovery agent with `record_canvas_answer` tool, `DiscoverySession` orchestrator with streaming turn loop, JSON-lines logging, CLI with replayable scripts. First live 10-turn HR conversation completes the canvas for ~$0.15. | `ac1fe68` |
-| 2026-09-13 | 1 | `.gitattributes` pins LF line endings. | `8f2ae63` |
-| 2026-09-13 | 2a | Four department `SKILL.md` files, strict loader. | `81d90ab` |
-| 2026-09-13 | 2b | Structured-output department classifier, `department_examples` tool, orchestrator runs the classifier once `key_activities` is captured. | `d0c4636` |
-| 2026-09-13 | 2 | Skills moved from `.claude/skills/` to `skills/`; path resolved from the package, not the CWD. | `4650b69` |
-| 2026-09-14 | 2 | Classifier benchmark: 20 labeled cases, Opus vs Sonnet × 3 repeats. Opus kept on stability. One label corrected by the evidence. | `b98e85f` |
-| 2026-09-14 | — | Hardening: SDK error containment, idle timeout, input validation, validated settings, pre-commit + CI with secret scanning. | `d9be267` |
-| 2026-09-14 | — | Project gitleaks rules after the default rule missed a plausible key shape. | `5c28038` |
-| 2026-09-14 | — | This learning log, and the CLAUDE.md rule to keep it current. | `ac08c32` |
-| 2026-09-14 | — | Scoped web search (Tavily) as an in-process tool with a domain allowlist, plus a `PreToolUse` hook capping calls per session. First hook. Live run: one search, generic query, USCIS-only results, cited in the recorded summary. | `f4ffa8e` |
+| 2026-09-12 | 1 | Canvas backbone, discovery agent with `record_canvas_answer` tool, `DiscoverySession` orchestrator with streaming turn loop, JSON-lines logging, CLI with replayable scripts. First live 10-turn HR conversation completes the canvas for ~$0.15. | `234af83` |
+| 2026-09-13 | 1 | `.gitattributes` pins LF line endings. | `e07752c` |
+| 2026-09-13 | 2a | Four department `SKILL.md` files, strict loader. | `809f740` |
+| 2026-09-13 | 2b | Structured-output department classifier, `department_examples` tool, orchestrator runs the classifier once `key_activities` is captured. | `dbbd0a9` |
+| 2026-09-13 | 2 | Skills moved from `.claude/skills/` to `skills/`; path resolved from the package, not the CWD. | `9163007` |
+| 2026-09-14 | 2 | Classifier benchmark: 20 labeled cases, Opus vs Sonnet × 3 repeats. Opus kept on stability. One label corrected by the evidence. | `368e448` |
+| 2026-09-14 | — | Hardening: SDK error containment, idle timeout, input validation, validated settings, pre-commit + CI with secret scanning. | `7504eda` |
+| 2026-09-14 | — | Project gitleaks rules after the default rule missed a plausible key shape. | `752ca82` |
+| 2026-09-14 | — | This learning log, and the CLAUDE.md rule to keep it current. | `983489d` |
+| 2026-09-14 | — | Scoped web search (Tavily) as an in-process tool with a domain allowlist, plus a `PreToolUse` hook capping calls per session. First hook. Live run: one search, generic query, USCIS-only results, cited in the recorded summary. | `08925a6` |
 
-| 2026-09-14 | 3 | SOP library as an external stdio MCP server: eight synthetic SOPs, strict loader, IDF-weighted keyword search, `MCPServer` over stdio, wired via the SDK's `mcp_servers` stdio config next to the in-process canvas server. Live run: on "our onboarding checklist" the agent searched and read the packet-review SOP on turn 1, then asked whether the I-9 document inspection is part of the checklist pass. | `66c30bf` |
+| 2026-09-14 | 3 | SOP library as an external stdio MCP server: eight synthetic SOPs, strict loader, IDF-weighted keyword search, `MCPServer` over stdio, wired via the SDK's `mcp_servers` stdio config next to the in-process canvas server. Live run: on "our onboarding checklist" the agent searched and read the packet-review SOP on turn 1, then asked whether the I-9 document inspection is part of the checklist pass. | `6101b39` |
 
-| 2026-09-14 | 4 | Completeness check and clarification loop: per-category rubric as data, a structured-output judge run inside the record tool so a gap becomes a follow-up in the same reply, a clarification budget of two per category, `is_ready_for_review` as the handoff decision, open gaps carried to the reviewer. Live run: "just the HR team" was flagged for dependents, the agent asked, the re-record passed. | `ab50855` |
+| 2026-09-14 | 4 | Completeness check and clarification loop: per-category rubric as data, a structured-output judge run inside the record tool so a gap becomes a follow-up in the same reply, a clarification budget of two per category, `is_ready_for_review` as the handoff decision, open gaps carried to the reviewer. Live run: "just the HR team" was flagged for dependents, the agent asked, the re-record passed. | `fb20a7c` |
 
-| 2026-09-14 | 5 | HITL gate: compiled spec from the snapshot, rule-based risk with evidence per flag, append-only review log with validated decisions, send-back delivered through the SDK's `resume=` as a reviewer-framed instruction turn. CLI grew `review` and `resume`. Live round trip: send-back → resume → the agent asked for the intake system's product name → re-recorded as v2 → spec v2. | `a91b3af` |
+| 2026-09-14 | 5 | HITL gate: compiled spec from the snapshot, rule-based risk with evidence per flag, append-only review log with validated decisions, send-back delivered through the SDK's `resume=` as a reviewer-framed instruction turn. CLI grew `review` and `resume`. Live round trip: send-back → resume → the agent asked for the intake system's product name → re-recorded as v2 → spec v2. | `fbb9c5c` |
 
-| 2026-09-15 | 6 | Builder subagent: parent + `AgentDefinition` via the `Agent` tool, a `PreToolUse` hook as the entire permission policy (workspace jail, command allowlist, parent denied), Python-side verification, the first output-format template (Q&A stub). Live build: six files, 8 tests passed, two commands denied and adapted, $0.46. Found and closed an auto-memory leak into every agent. | `8fd0b1b` |
+| 2026-09-15 | 6 | Builder subagent: parent + `AgentDefinition` via the `Agent` tool, a `PreToolUse` hook as the entire permission policy (workspace jail, command allowlist, parent denied), Python-side verification, the first output-format template (Q&A stub). Live build: six files, 8 tests passed, two commands denied and adapted, $0.46. Found and closed an auto-memory leak into every agent. | `8bdd6c7` |
 
-| 2026-09-28 | 7 | FastAPI over the whole pipeline: three route groups for the three audiences, SSE for the requester's turn, a `RunStore` behind an interface, one-turn-at-a-time session locking, an idle sweeper, bearer token on reviewer/admin, builds as background tasks. Live: a real turn streamed end to end, snapshot persisted under the API's own uuid, queue picking up earlier CLI runs from the same `runs/`. | `7f844f6` |
+| 2026-09-28 | 7 | FastAPI over the whole pipeline: three route groups for the three audiences, SSE for the requester's turn, a `RunStore` behind an interface, one-turn-at-a-time session locking, an idle sweeper, bearer token on reviewer/admin, builds as background tasks. Live: a real turn streamed end to end, snapshot persisted under the API's own uuid, queue picking up earlier CLI runs from the same `runs/`. | `f4aa98e` |
 
-| 2026-09-28 | 8a | Next.js 16 scaffold and the requester's conversation view: a typed API client that reads the SSE stream by hand, streaming text with a caret, lazy session creation. Live: two turns streamed into the browser. | `9bcba59` |
-| 2026-09-28 | 8b | `/s/<id>` routing with an in-place URL rewrite, transcript restored from the server, reopen after a send-back, and 👍/👎 feedback (new `blueprint/feedback.py`, two new endpoints). Live: the whole send-back → reopen → answer → re-record loop through the browser. Three bugs found by running it that neither the tests nor the typechecker could see. | `9f50425` |
+| 2026-09-28 | 8a | Next.js 16 scaffold and the requester's conversation view: a typed API client that reads the SSE stream by hand, streaming text with a caret, lazy session creation. Live: two turns streamed into the browser. | `7185af4` |
+| 2026-09-28 | 8b | `/s/<id>` routing with an in-place URL rewrite, transcript restored from the server, reopen after a send-back, and 👍/👎 feedback (new `blueprint/feedback.py`, two new endpoints). Live: the whole send-back → reopen → answer → re-record loop through the browser. Three bugs found by running it that neither the tests nor the typechecker could see. | `6391f50` |
 
-| 2026-09-28 | 9 | Reviewer view: approval queue with risk badges, the compiled spec with evidence per flag, and approve / send back / reject. The frontend grows a server side — route handlers hold the admin token, `server-only` makes that a build error to get wrong, and reviewer identity moves into an httpOnly cookie. | `d301a9b` |
+| 2026-09-28 | 9 | Reviewer view: approval queue with risk badges, the compiled spec with evidence per flag, and approve / send back / reject. The frontend grows a server side — route handlers hold the admin token, `server-only` makes that a build error to get wrong, and reviewer identity moves into an httpOnly cookie. | `c161367` |
 
-| 2026-09-28 | 10 | Admin view: every session including unfinished ones, the full trace behind each (classification, canvas versions, per-turn tool calls and verdicts, denied searches, feedback, decisions, build report), build controls behind the gate, and the recorded eval runs as a table. New `blueprint/eval_runs.py` reads what the harness writes. | `8edbcbc` |
+| 2026-09-28 | 10 | Admin view: every session including unfinished ones, the full trace behind each (classification, canvas versions, per-turn tool calls and verdicts, denied searches, feedback, decisions, build report), build controls behind the gate, and the recorded eval runs as a table. New `blueprint/eval_runs.py` reads what the harness writes. | `1edca8d` |
 
-| 2026-09-28 | 11 | Shared eval harness plus two suites. `risk_gate`: 18 labeled canvases, deterministic, free — found three flags that were not firing at all. `completeness`: 21 labeled captures across three models, settling the checker-model question deferred since step 4. Both appear in the dashboard without it changing. | `b551e91` |
+| 2026-09-28 | 11 | Shared eval harness plus two suites. `risk_gate`: 18 labeled canvases, deterministic, free — found three flags that were not firing at all. `completeness`: 21 labeled captures across three models, settling the checker-model question deferred since step 4. Both appear in the dashboard without it changing. | `141be0d` |
 
-| 2026-09-28 | — | Real sign-in in front of `/review` and `/admin`: scrypt passwords, HMAC session cookies, roles, and `proxy.ts` as the single gate. Fails closed. Closes the deferred auth gap from steps 9 and 10. | `ab83320` |
-| 2026-09-28 | 12 | SQLite behind the existing `RunStore` protocol, an append-only `audit_events` table, redaction at write, and retention. 12 runs migrated with 96 derived events. No route changed. | `aac4f26` |
+| 2026-09-28 | — | Real sign-in in front of `/review` and `/admin`: scrypt passwords, HMAC session cookies, roles, and `proxy.ts` as the single gate. Fails closed. Closes the deferred auth gap from steps 9 and 10. | `da59411` |
+| 2026-09-28 | 12 | SQLite behind the existing `RunStore` protocol, an append-only `audit_events` table, redaction at write, and retention. 12 runs migrated with 96 derived events. No route changed. | `c102d8b` |
 
-| 2026-09-28 | 13 | README with a verified Mermaid diagram and three real screenshots, an honest-limits section, and `docs/DEMO.md` as a three-minute walkthrough. | `e26fa6d` |
+| 2026-09-28 | 13 | README with a verified Mermaid diagram and three real screenshots, an honest-limits section, and `docs/DEMO.md` as a three-minute walkthrough. | `59f0c1b` |
 
 **All 13 build-order steps are complete.** 434 tests, ruff + mypy `--strict` clean, 36 commits.
 ~5.9k lines of backend, ~4.6k of tests, ~2.5k of frontend, ~0.9k of evals. Twelve recorded
