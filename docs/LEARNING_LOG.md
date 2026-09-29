@@ -637,6 +637,15 @@ minutes and showed both that it parsed *and* that it needed rebuilding as a line
 README diagram that needs zooming is not doing its job, and "it's valid syntax" would not have
 caught that.
 
+### A signed token proves who issued it, not that the account still exists
+Deleting the dev accounts is what surfaced it: a deleted admin's cookie still opened
+`/admin`. Stateless sessions are self-contained by design, which is exactly why something has
+to re-check them — the signature was never in question, the account was. Two layers were
+wrong at once: a user store cached on first read and never re-read, and nothing consulting
+that store after issue. The fix goes in `readSession` rather than at each call site, for the
+same reason the auth gate lives in `proxy.ts`: a check every caller has to remember is a check
+someone will forget. *`frontend/lib/server/auth.ts`*
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -669,6 +678,8 @@ project rules were added. "It's configured" is not evidence.
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 | The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| Wrote a verification command that could not fail: `git log -S '<employer-name>' \| head && echo FOUND` printed FOUND on a clean result, because `head` exits 0 on empty input. | Caught only because the answer contradicted a second check. A verification whose failure mode is a false pass is worse than none — assert on a count, not on an exit code. |
+| Built a session system where deleting a user changed nothing until the process restarted, and a deleted user's cookie kept full admin access for its remaining 12 hours. | Found by deleting the dev accounts and idly checking whether the old cookie still worked. "Is the thing I just removed actually gone?" is worth asking after every deletion, not just satisfying ones. |
 | Broke `cli.py` by putting an escape sequence through a shell heredoc — the fourth or fifth time, and there is already a rule in this log saying not to. | The rule was right and I did not follow it. Escapes go through the editor tool. Writing a rule down is not the same as having internalised it, and the tell is that this entry could have been copied from the earlier one. |
 | Let `ruff --fix` strip imports I had just added but not yet referenced, then watched F821 fire on the code that used them a minute later. | Auto-fix acts on the file as it is, not on the file as intended. Add the import and its first use in the same edit, or run the formatter after the code is complete rather than between two halves of one change. |
 | A regex meant to insert three fields after `cors_origins=` matched `cors_origins=tuple(`, which spans lines, and injected them into the middle of a generator expression. | Anchoring on the start of a multi-line expression is anchoring on nothing. For structured edits into real code, match the whole expression or use the editor tool. |
@@ -729,8 +740,15 @@ prototype should be (decided per output format in step 6).
 ### Deployment shape
 
 - **Auth has no rate limiting.** scrypt makes each attempt expensive, but nothing caps how many
-  attempts `/api/auth` will take. Sessions last 12 hours with no refresh or revocation list, so
-  signing a user out everywhere means rotating `BLUEPRINT_SESSION_SECRET`.
+  attempts `/api/auth` will take.
+- **Signing out a user you want to keep** still means rotating `BLUEPRINT_SESSION_SECRET`.
+  Deleting or demoting an account takes effect on the next request — `readSession` checks the
+  account still exists with the same role — but there is no revocation list for "log this
+  person out without touching their account".
+- **`lib/server/auth.ts` has no automated tests.** It is the most security-sensitive file in
+  the repo and was verified by driving a running server: sign in, demote, confirm 401, delete,
+  confirm 503. That found a real bug; it does not stop the next one. Node's built-in test
+  runner would cover the signing, expiry and account-validity paths without adding a framework.
 - **The session registry is in-process**, so the API runs as exactly one worker. A second
   uvicorn worker would route a requester's follow-up to a process that has never heard of their
   session. The SQLite store is where a shared session lookup would live; until then this is a
