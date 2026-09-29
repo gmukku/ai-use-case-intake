@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -65,7 +66,7 @@ from blueprint.review import (
     review_status,
     summarize_spec,
 )
-from blueprint.settings import Settings, load_settings
+from blueprint.settings import Settings, SettingsError, load_settings
 from blueprint.skills import DepartmentSkill, load_skills
 from blueprint.store import (
     AuditEvent,
@@ -897,6 +898,13 @@ def app_from_env() -> FastAPI:
     """
     load_dotenv()
     configure_logging(LOG_FILE)
-    settings = load_settings(os.environ)
+    try:
+        settings = load_settings(os.environ)
+    except SettingsError as exc:
+        # The docstring's promise is "a plain message", and a traceback is not one. Missing
+        # credentials is the first thing anyone hits on a fresh clone; it should read as a
+        # step they skipped, not as software that is broken. Matches what cli.py does.
+        print(f"configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     logger.info("api.starting", extra=settings.to_dict())
     return create_app(settings)
