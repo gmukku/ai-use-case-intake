@@ -646,6 +646,20 @@ that store after issue. The fix goes in `readSession` rather than at each call s
 same reason the auth gate lives in `proxy.ts`: a check every caller has to remember is a check
 someone will forget. *`frontend/lib/server/auth.ts`*
 
+### A test that has never failed has not been shown to test anything
+Wrote 27 tests for the auth core, then reverted the account-validity check and re-ran them.
+Exactly the four tests describing that behaviour failed, and restoring it passed all 27. That
+step took a minute and is the only evidence the tests are wired to the thing they claim to
+cover — a green suite proves the code passes, not that the test would notice if it stopped.
+*`frontend/lib/server/auth.test.ts`*
+
+### Import the module the way production imports it
+`auth.ts` opens with `import "server-only"`, which throws in plain Node. The temptation is to
+mock it, and then the tests exercise a copy rather than the real module. `server-only` exports
+an empty module under the `react-server` condition, which is exactly how Next resolves it on
+the server — so `node --conditions=react-server --test` runs the genuine file with no mocking
+at all. Worth checking what a blocker actually *is* before working around it.
+
 ### Security controls are tested, not assumed
 `gitleaks` in pre-commit and CI. Tested by staging three key shapes and a normal string; the
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
@@ -678,6 +692,7 @@ project rules were added. "It's configured" is not evidence.
 | Started writing the SOP server against `FastMCP`, which no longer exists in `mcp` 2.x. | Probe the installed library's API before writing against a remembered one; one `inspect` call saved a rewrite. |
 | Wrote a ranking test with a query the corpus phrased differently ("three" vs "3") and full of generic terms; it failed for two reasons at once. | Read the per-term scores before deciding whether the ranker or the test is wrong. Here it was both: the test was unrealistic *and* the ranker needed IDF. |
 | The orchestrator set `self.session_id` from every `ResultMessage`. Harmless with the real SDK, which echoes the id back — but the API uses that id as its registry key *and* its snapshot filename, so one divergent result would have stranded a run under a name nothing looked up. | A value that two subsystems treat as authoritative must have one owner. The caller's id is now pinned and a mismatch is logged, never adopted. Found by asserting on the id in an API test, not by reasoning about it. |
+| Cached the user store on the file's mtime alone. Filesystem mtime resolution is coarse enough that two writes inside one tick would serve the first one's contents indefinitely — which would have made the account-validity tests flaky and, more quietly, made a fast edit to `users.json` invisible. | Noticed while writing tests that needed to rewrite the same file twice. Tests exercise timings that production rarely does, which is a reason to write them beyond the obvious one. |
 | Wrote a verification command that could not fail: `git log -S '<employer-name>' \| head && echo FOUND` printed FOUND on a clean result, because `head` exits 0 on empty input. | Caught only because the answer contradicted a second check. A verification whose failure mode is a false pass is worse than none — assert on a count, not on an exit code. |
 | Built a session system where deleting a user changed nothing until the process restarted, and a deleted user's cookie kept full admin access for its remaining 12 hours. | Found by deleting the dev accounts and idly checking whether the old cookie still worked. "Is the thing I just removed actually gone?" is worth asking after every deletion, not just satisfying ones. |
 | Broke `cli.py` by putting an escape sequence through a shell heredoc — the fourth or fifth time, and there is already a rule in this log saying not to. | The rule was right and I did not follow it. Escapes go through the editor tool. Writing a rule down is not the same as having internalised it, and the tell is that this entry could have been copied from the earlier one. |
@@ -745,10 +760,8 @@ prototype should be (decided per output format in step 6).
   Deleting or demoting an account takes effect on the next request — `readSession` checks the
   account still exists with the same role — but there is no revocation list for "log this
   person out without touching their account".
-- **`lib/server/auth.ts` has no automated tests.** It is the most security-sensitive file in
-  the repo and was verified by driving a running server: sign in, demote, confirm 401, delete,
-  confirm 503. That found a real bug; it does not stop the next one. Node's built-in test
-  runner would cover the signing, expiry and account-validity paths without adding a framework.
+- **The requester UI still has no automated tests**, though `lib/server/auth.ts` now has 27.
+  Playwright against the real API is the remaining gap.
 - **The session registry is in-process**, so the API runs as exactly one worker. A second
   uvicorn worker would route a requester's follow-up to a process that has never heard of their
   session. The SQLite store is where a shared session lookup would live; until then this is a
