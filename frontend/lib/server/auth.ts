@@ -1,7 +1,7 @@
 import "server-only";
 
 import { createHmac, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { promisify } from "node:util";
 
 /**
@@ -45,19 +45,46 @@ export function allows(role: Role, required: Role): boolean {
 
 // -- the user store -------------------------------------------------------------------------
 
-let cachedUsers: User[] | null = null;
+// Cached against the file's mtime rather than loaded once. A cache that never re-reads means
+// deleting an account does not lock anyone out until the process restarts, which is not what
+// anyone expects "delete the user" to mean.
+let cache: { path: string; mtimeMs: number; users: User[] } | null = null;
 
 function loadUsers(): User[] {
-  if (cachedUsers) return cachedUsers;
   const path = process.env.BLUEPRINT_USERS_FILE ?? "users.json";
+  // -1 marks "no file", which is distinct from any real mtime, so an absent file is cached
+  // as an empty list instead of falling through to whatever was loaded before it vanished.
+  let mtimeMs = -1;
+  try {
+    mtimeMs = statSync(path).mtimeMs;
+  } catch {
+    mtimeMs = -1;
+  }
+  if (cache && cache.path === path && cache.mtimeMs === mtimeMs) return cache.users;
+
+  let users: User[] = [];
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
-    cachedUsers = Array.isArray(parsed) ? (parsed as User[]) : [];
+    users = Array.isArray(parsed) ? (parsed as User[]) : [];
   } catch {
     // Absent or unreadable means nobody is configured, which means nobody gets in.
-    cachedUsers = [];
+    users = [];
   }
-  return cachedUsers;
+  cache = { path, mtimeMs, users };
+  return users;
+}
+
+/**
+ * Is the account behind this session still there, with the same role?
+ *
+ * A signed cookie proves only that *we* issued it. Without this, a session stays valid for
+ * its full 12 hours after the account is deleted or demoted, because nothing ever consults
+ * the user store again. Checking here rather than at each call site means every reader of
+ * `readSession` gets it.
+ */
+function accountStillValid(session: Session): boolean {
+  const user = loadUsers().find((u) => u.username === session.username);
+  return Boolean(user && user.role === session.role);
 }
 
 export function isConfigured(): boolean {
@@ -139,7 +166,13 @@ export function readSession(cookie: string | undefined): Session | null {
   if (!Number(expiry) || Number(expiry) < Date.now()) return null;
   if (role !== "reviewer" && role !== "admin") return null;
 
-  return { username: decodeURIComponent(username), name: decodeURIComponent(name), role };
+  const session: Session = {
+    username: decodeURIComponent(username),
+    name: decodeURIComponent(name),
+    role,
+  };
+  // The cookie is authentic; that is not the same as the account still existing.
+  return accountStillValid(session) ? session : null;
 }
 
 export const SESSION_MAX_AGE_S = SESSION_TTL_MS / 1000;
