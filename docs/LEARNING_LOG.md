@@ -693,55 +693,62 @@ project rules were added. "It's configured" is not evidence.
 Kept as a list rather than quietly dropped. Everything here is a decision, not an oversight —
 the README's "Honest limits" is the reader-facing version of this section.
 
+Items completed during the build are removed rather than struck through; the commit history
+and the progress table are where "when did this get done" lives. Six entries were pruned on
+2026-09-28 after they had sat here for several steps already finished: reviewer identity (now
+the authenticated account), transcript redaction and retention (step 12), requester feedback
+(step 8b), the checker-model benchmark and the risk-gate eval (step 11), and how small a
+prototype should be (decided per output format in step 6).
+
+### Correctness and coverage
+
 - **Two of CLAUDE.md's four eval measures are not built.** `risk_gate` covers the
   false-negative check and `completeness` covers per-category capture quality. Still missing:
   (a) **discovery completeness end to end** — were all seven categories actually captured over
-  a whole conversation — and (b) **example relevance** and the **rubric-scored judge
+  a whole conversation — and (b) **example relevance** plus the **rubric-scored judge
   comparison of a compiled spec against a gold one** (completeness / accuracy / actionability,
   never an overall score). Both need a *stakeholder simulator*: a second model playing the
-  requester from a persona brief, because fixed reply scripts break as soon as the agent
-  adapts its questions. Estimated ~$0.30 per case for the conversation plus judge, so a 20-case
-  run is $6–8 — a real decision rather than a default, which is why it is here and not done.
-- **Requester 👍/👎 as judge-validation labels** (the step 8 plan) needs enough real feedback
-  to be worth anything. Two ratings exist so far.
-- **Auth has no rate limiting.** scrypt makes each attempt expensive, but nothing caps how
-  many attempts `/api/auth` will take. Sessions are 12 hours with no refresh or revocation
-  list, so signing a user out everywhere means rotating `BLUEPRINT_SESSION_SECRET`.
-- **Redaction has never run on text that contained an identifier outside a test.** The
-  synthetic conversations have none, so the migration of all 12 runs redacted nothing. The
-  unit tests cover it against a real SQLite file; a live run has not.
-- **The build button has not been clicked in anger.** The endpoints behind it are tested
-  (202, background task, force semantics, crash containment) and the guards were checked live
-  through the proxy, but a real build from the UI costs ~$0.46 and was not spent.
+  requester from a persona brief, because fixed reply scripts break as soon as the agent adapts
+  its questions. Roughly $0.30 per case including the judge, so a 20-case run is $6–8 — a real
+  decision rather than a default, which is why it is here and not done.
+- **The requester view has no automated tests.** The backend has 434; the React has a type
+  checker and a linter. Every UI bug in this project was found by clicking. Playwright against
+  the real API would have caught the sticky-composer overlap and the locked-out composer.
+- **Requester 👍/👎 as judge-validation labels** needs enough real feedback to be worth
+  anything. Two ratings exist so far.
 
-- **The requester view has no tests.** The backend it talks to has 321; the React has a
-  typechecker and a linter. Every bug in step 8 was found by clicking. Playwright against the
-  real API would have caught the sticky-composer overlap and the locked-out composer.
-- **One run's transcript was lost** (`32ddecd8`) to the resume bug before it was found. Left as
-  it is rather than reconstructed — the damage is the evidence.
-- **Bedrock auth path**: `.env.example` documents it; still not exercised. Step 7 came and went
-  on the API-key path. Worth proving before the README claims both work.
-- **The session registry is in-process**, so the API runs as exactly one worker today. More than
-  one uvicorn worker would route a requester's second message to a process that has never heard
-  of their session. Step 12's store is where a shared session lookup would live; until then this
-  is a documented single-process deployment, not an accident.
-- **Reviewer identity is a string in the request body.** One shared bearer token says *whether*
-  a caller may review, and `reviewer` in the payload says who they claim to be. Fine for a
-  portfolio demo, not for an audit trail anyone relies on; real deployment needs per-user auth
-  before the review log means anything.
-- **Transcript redaction**: stakeholder text lands verbatim in `runs/` and logs. Local-only
-  today; step 12's SQLite store needs redaction and retention.
-- **HR skill file and rubric review** by the domain owner: `skills/hr/SKILL.md` and
-  `CATEGORY_RUBRIC` in `canvas.py` decide what the agent chases.
-- **User feedback in the requester view** (step 8): per-message 👍/👎 with optional comment,
-  end-of-conversation rating. Stored against `(session_id, turn)` in step 12; used as human
-  labels for judge validation in step 11. Keyed off `TurnResult`, so no trace change needed.
-- **Checker model benchmark**: same harness as `evals/skill_matching`, labeled (category,
-  summary) → missing elements; decide whether a cheaper model holds.
-- **Risk-gate false-negative eval** (step 11): labeled snapshots that *should* flag, run
-  through `assess_risk`; the rules are deterministic so this is cheap and exact.
-- **Spec title fallback is ugly** (first 80 chars of the opener); `--summarize` fixes it for
-  ~1¢. The reviewer view should always use the summarized title.
-- **Web search state sites**: the allowlist is federal only; state `.gov` sites are a per-
-  deployment setting still to be added.
-- **"How small is the prototype"**: decided per output format when the Builder is built.
+### Not exercised
+
+- **The Bedrock auth path.** `.env.example` documents it; every run in this project went over
+  the Anthropic API. Worth proving before any README claims both work.
+- **Redaction against text that actually contains an identifier**, outside a unit test. The
+  synthetic conversations have none, so migrating all 12 runs redacted nothing.
+- **The build button, from the UI.** The endpoints behind it are tested and both guards were
+  checked live through the proxy, but a real build costs ~$0.46 and that was not spent.
+
+### Deployment shape
+
+- **Auth has no rate limiting.** scrypt makes each attempt expensive, but nothing caps how many
+  attempts `/api/auth` will take. Sessions last 12 hours with no refresh or revocation list, so
+  signing a user out everywhere means rotating `BLUEPRINT_SESSION_SECRET`.
+- **The session registry is in-process**, so the API runs as exactly one worker. A second
+  uvicorn worker would route a requester's follow-up to a process that has never heard of their
+  session. The SQLite store is where a shared session lookup would live; until then this is a
+  documented single-process deployment, not an accident.
+- **The web-search allowlist is federal `.gov` only.** State sites are a per-deployment setting
+  still to be added.
+
+### Content and polish
+
+- **HR skill file and rubric review by the domain owner.** `skills/hr/SKILL.md` and
+  `CATEGORY_RUBRIC` in `canvas.py` decide what the agent chases, and I wrote both.
+- **The spec title fallback is the first 80 characters of the opener**, which reads badly in
+  the queue. The reviewer view has a `rewrite title` button that calls the summarizer for ~1¢
+  on demand; making it automatic per row would cost that on every page load for rows nobody
+  opens, so the queue still shows the ugly version.
+
+### Kept as evidence
+
+- **One run's transcript was lost** (`32ddecd8`) to the resume bug in step 8, before it was
+  found. Left as it is rather than reconstructed — the admin view showing "10 turns" beside
+  "Turns (2 stored)" is the clearest possible record of what that bug did.
