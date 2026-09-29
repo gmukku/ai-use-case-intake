@@ -33,6 +33,5 @@ runs/*.db
 runs/*.db-wal
 runs/*.db-shm
 
-# Private working brief: names a previous employer and holds personal working notes.
-# Kept on disk, never published.
+# Local working notes. Kept on disk, never published.
 CLAUDE.md

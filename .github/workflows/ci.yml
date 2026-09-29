@@ -17,6 +17,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Names that must not appear in a public repo. gitleaks finds credentials; this finds
+      # identifying strings, which are not secrets but do not belong here either.
+      #
+      # It exists because the name came back. A history rewrite removed it, and four commits
+      # later it was quoted again — inside the learning-log entry describing that very
+      # rewrite. The original check ran once, against the past. This one runs on every push.
+      #
+      # The pattern is a character class so this file does not itself spell out the string it
+      # guards against, and both counts are asserted explicitly: grep exits 1 when it finds
+      # nothing, which is the *pass*, so an exit code here means the opposite of what it
+      # looks like. That confusion is how the original check managed to report a clean repo.
+      - name: denylisted names
+        run: |
+          tree=$(git grep -Ii -E 'E[x]tensis' -- . | wc -l || true)
+          hist=$(git log -p --all | grep -ciE 'E[x]tensis' || true)
+          echo "occurrences — working tree: $tree, history: $hist"
+          if [ "$tree" -ne 0 ] || [ "$hist" -ne 0 ]; then
+            echo "::error::a denylisted name is present; it must not reach a public repo"
+            exit 1
+          fi
+
   backend:
     name: backend — lint, types, tests
     runs-on: ubuntu-latest
