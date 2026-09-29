@@ -48,19 +48,27 @@ export function allows(role: Role, required: Role): boolean {
 // Cached against the file's mtime rather than loaded once. A cache that never re-reads means
 // deleting an account does not lock anyone out until the process restarts, which is not what
 // anyone expects "delete the user" to mean.
-let cache: { path: string; mtimeMs: number; users: User[] } | null = null;
+let cache: { path: string; mtimeMs: number; size: number; users: User[] } | null = null;
 
 function loadUsers(): User[] {
   const path = process.env.BLUEPRINT_USERS_FILE ?? "users.json";
   // -1 marks "no file", which is distinct from any real mtime, so an absent file is cached
   // as an empty list instead of falling through to whatever was loaded before it vanished.
+  // Size is part of the key because mtime resolution is coarse on some filesystems: two
+  // writes inside the same tick would otherwise serve the first one's contents forever.
   let mtimeMs = -1;
+  let size = -1;
   try {
-    mtimeMs = statSync(path).mtimeMs;
+    const stat = statSync(path);
+    mtimeMs = stat.mtimeMs;
+    size = stat.size;
   } catch {
     mtimeMs = -1;
+    size = -1;
   }
-  if (cache && cache.path === path && cache.mtimeMs === mtimeMs) return cache.users;
+  if (cache && cache.path === path && cache.mtimeMs === mtimeMs && cache.size === size) {
+    return cache.users;
+  }
 
   let users: User[] = [];
   try {
@@ -70,7 +78,7 @@ function loadUsers(): User[] {
     // Absent or unreadable means nobody is configured, which means nobody gets in.
     users = [];
   }
-  cache = { path, mtimeMs, users };
+  cache = { path, mtimeMs, size, users };
   return users;
 }
 

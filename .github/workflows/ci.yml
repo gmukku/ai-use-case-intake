@@ -17,8 +17,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  gate:
-    name: lint, types, tests
+  backend:
+    name: backend — lint, types, tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,3 +32,26 @@ jobs:
       - run: uv run mypy
       # Unit tests never call the model; no API key is configured here on purpose.
       - run: uv run pytest -q
+      # Deterministic and free. Exits non-zero on a scrutiny false negative, which is the
+      # failure the risk gate exists to prevent.
+      - run: uv run python evals/risk_gate/run.py
+
+  frontend:
+    name: frontend — lint, types, build, tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx eslint .
+      - run: npm run build
+      # The auth core: passwords, session signing, and that a session dies with its account.
+      - run: npm test
