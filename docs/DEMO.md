@@ -3,9 +3,9 @@
 A three-minute walkthrough. Written to be recorded from, and to be read on its own if nobody
 ever records it.
 
-The point of the ordering: **show the thing working before explaining how it works.** An
-interviewer who sees a stakeholder get a real question from an agent in the first twenty
-seconds will watch the rest. One who gets an architecture diagram first will not.
+The point of the ordering: **show the thing working before explaining how it works.** Someone
+who sees a stakeholder get a real question from an agent in the first twenty seconds will watch
+the rest. Someone who gets an architecture diagram first will not.
 
 ---
 

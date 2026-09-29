@@ -258,6 +258,16 @@ multi-tenant.
   considered, and the mistakes kept rather than cleaned up.
 - **[`docs/DEMO.md`](docs/DEMO.md)** — a three-minute walkthrough.
 
+## Status and support
+
+Built and maintained by one person as a working reference implementation. It is complete
+enough to run end to end and is not a supported product: issues and pull requests are welcome
+but may go unanswered, and [Current scope](#current-scope) is the honest list of what it does
+not do yet. Fork it freely — that is what the licence is for.
+
+MIT licensed. Everything in the repository is synthetic; there is no real organisational data
+in it.
+
 ## Stack
 
 Python 3.12 · Claude Agent SDK · FastAPI · SQLite · MCP · Next.js 16 · TypeScript · Tailwind ·
