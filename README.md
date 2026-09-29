@@ -145,6 +145,11 @@ uv sync
 cp .env.example .env          # add ANTHROPIC_API_KEY
 ```
 
+Claude reaches the model three ways: the Anthropic API directly, Amazon Bedrock
+(`CLAUDE_CODE_USE_BEDROCK=1`), or Google Vertex AI (`CLAUDE_CODE_USE_VERTEX=1`). Pick one in
+`.env`; each is validated at startup, so a missing variable is named rather than surfacing
+later as a subprocess error.
+
 The conversation alone, in a terminal — the fastest way to see the pipeline:
 
 ```bash

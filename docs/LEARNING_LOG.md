@@ -665,6 +665,23 @@ at all. Worth checking what a blocker actually *is* before working around it.
 first attempt exposed that the default Anthropic rule matched only one exact key length, so
 project rules were added. "It's configured" is not evidence.
 
+### Validate what the deployment can actually promise
+Adding the Vertex auth path made the obvious move — mirror the Bedrock branch — the wrong one.
+Bedrock requires one of `AWS_PROFILE` / `AWS_ACCESS_KEY_ID` / `AWS_BEARER_TOKEN_BEDROCK`, so
+demanding a credential variable is a fair check. Vertex authenticates with Google Application
+Default Credentials, which on a GCE VM or Cloud Run arrive from the instance metadata server
+with **nothing set in the environment at all**. A symmetrical check would have rejected the
+deployment the path exists to serve.
+
+So the branch validates project and region and deliberately does not validate credentials, and
+the reasoning sits in a comment beside it — because "this check is missing" is what a careful
+reader will conclude otherwise, and they would be wrong. The same reasoning let the region
+check accept a per-model `VERTEX_REGION_CLAUDE_*` override instead of the global
+`CLOUD_ML_REGION`: rejecting a configuration that works is a real cost, not a safe default.
+
+The env var names were read out of the bundled CLI binary rather than recalled, which is the
+`FastMCP` lesson applied before it could cost anything. *`blueprint/settings.py`*
+
 ---
 
 ## Mistakes and what they taught

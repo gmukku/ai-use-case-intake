@@ -4,9 +4,15 @@ Every secret and tunable enters the program here and nowhere else. Missing requi
 fail at startup with a plain message instead of surfacing later as an opaque subprocess
 error. Secret *values* are never logged, printed, or included in ``to_dict``.
 
-Two auth paths (mutually exclusive by precedence, matching the SDK):
+Three auth paths. The two cloud providers are explicit opt-ins and setting both is an error,
+not a precedence question; either one wins over a stray ``ANTHROPIC_API_KEY``:
     - Bedrock: ``CLAUDE_CODE_USE_BEDROCK=1`` plus AWS credentials and region.
+    - Vertex: ``CLAUDE_CODE_USE_VERTEX=1`` plus a GCP project and region.
     - Direct API: ``ANTHROPIC_API_KEY``.
+
+None of the provider values are stored on ``Settings``. The CLI subprocess reads them from the
+environment itself; this module's job is to fail here, with a message naming the variable,
+rather than let a missing one surface as an opaque subprocess error three layers down.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ class Settings:
     """Everything the application reads from the environment, validated."""
 
     auth_mode: str
-    """``"bedrock"`` or ``"api_key"``."""
+    """``"bedrock"``, ``"vertex"`` or ``"api_key"``."""
     model: str
     classifier_model: str
     max_budget_usd: float
@@ -129,6 +135,13 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     """
     env = os.environ if env is None else env
 
+    # Both flags set is a mistake rather than a preference, and silently picking one would hide
+    # it until the bill arrived from the wrong cloud.
+    if _flag(env, "CLAUDE_CODE_USE_BEDROCK") and _flag(env, "CLAUDE_CODE_USE_VERTEX"):
+        raise SettingsError(
+            "CLAUDE_CODE_USE_BEDROCK and CLAUDE_CODE_USE_VERTEX are both set; pick one"
+        )
+
     if _flag(env, "CLAUDE_CODE_USE_BEDROCK"):
         auth_mode = "bedrock"
         if not _secret(env, "AWS_REGION") and not _secret(env, "AWS_DEFAULT_REGION"):
@@ -142,12 +155,34 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
                 "CLAUDE_CODE_USE_BEDROCK=1 requires AWS credentials: set AWS_PROFILE, "
                 "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or AWS_BEARER_TOKEN_BEDROCK"
             )
+    elif _flag(env, "CLAUDE_CODE_USE_VERTEX"):
+        auth_mode = "vertex"
+        if not _secret(env, "ANTHROPIC_VERTEX_PROJECT_ID"):
+            raise SettingsError("CLAUDE_CODE_USE_VERTEX=1 requires ANTHROPIC_VERTEX_PROJECT_ID")
+        # CLOUD_ML_REGION is the global region, but a per-model VERTEX_REGION_CLAUDE_* override
+        # is sufficient on its own — Claude models are not served from every region, so pinning
+        # one model elsewhere is a normal configuration. Demanding the global one would reject
+        # a setup that works.
+        has_region = bool(_secret(env, "CLOUD_ML_REGION")) or any(
+            k.startswith("VERTEX_REGION_CLAUDE_") and _secret(env, k) for k in env
+        )
+        if not has_region:
+            raise SettingsError(
+                "CLAUDE_CODE_USE_VERTEX=1 requires CLOUD_ML_REGION, or a per-model "
+                "VERTEX_REGION_CLAUDE_* override"
+            )
+        # Deliberately no credential check, unlike Bedrock above. Vertex authenticates with
+        # Google Application Default Credentials, which on a GCE VM or Cloud Run arrive from
+        # the instance metadata server with no variable set anywhere. Requiring
+        # GOOGLE_APPLICATION_CREDENTIALS would reject the most common deployment. The cost is
+        # accepted knowingly: a machine with no ADC configured fails in the subprocess rather
+        # than here.
     elif _secret(env, "ANTHROPIC_API_KEY"):
         auth_mode = "api_key"
     else:
         raise SettingsError(
-            "no model credentials: set ANTHROPIC_API_KEY, or CLAUDE_CODE_USE_BEDROCK=1 with "
-            "AWS credentials (see .env.example)"
+            "no model credentials: set ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK=1 with AWS "
+            "credentials, or CLAUDE_CODE_USE_VERTEX=1 with a GCP project (see .env.example)"
         )
 
     web_search_enabled = _flag(env, "BLUEPRINT_WEB_SEARCH")

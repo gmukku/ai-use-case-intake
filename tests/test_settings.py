@@ -3,6 +3,11 @@ import pytest
 from blueprint.settings import DEFAULT_BUDGET_USD, SettingsError, load_settings
 
 API = {"ANTHROPIC_API_KEY": "sk-ant-test"}
+VERTEX = {
+    "CLAUDE_CODE_USE_VERTEX": "1",
+    "ANTHROPIC_VERTEX_PROJECT_ID": "test-project",
+    "CLOUD_ML_REGION": "us-east5",
+}
 
 
 class TestAuth:
@@ -36,6 +41,45 @@ class TestAuth:
             {**API, "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "x", "AWS_ACCESS_KEY_ID": "y"}
         )
         assert s.auth_mode == "bedrock"
+
+    def test_vertex_requires_a_project_and_a_region(self) -> None:
+        with pytest.raises(SettingsError, match="ANTHROPIC_VERTEX_PROJECT_ID"):
+            load_settings({"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "us-east5"})
+        with pytest.raises(SettingsError, match="CLOUD_ML_REGION"):
+            load_settings({"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "p"})
+        s = load_settings({**VERTEX})
+        assert s.auth_mode == "vertex"
+
+    def test_vertex_accepts_a_per_model_region_without_the_global_one(self) -> None:
+        s = load_settings(
+            {
+                "CLAUDE_CODE_USE_VERTEX": "1",
+                "ANTHROPIC_VERTEX_PROJECT_ID": "p",
+                "VERTEX_REGION_CLAUDE_5_OPUS": "europe-west1",
+            }
+        )
+        assert s.auth_mode == "vertex"
+
+    def test_vertex_does_not_require_a_credential_variable(self) -> None:
+        # Deliberate, and the asymmetry with Bedrock above is the point: Vertex reads Google
+        # Application Default Credentials, which on a GCE VM or Cloud Run come from the
+        # metadata server with nothing in the environment. A credential check here would
+        # reject the deployment this path exists to serve.
+        assert load_settings({**VERTEX}).auth_mode == "vertex"
+
+    def test_vertex_takes_precedence_over_api_key(self) -> None:
+        assert load_settings({**API, **VERTEX}).auth_mode == "vertex"
+
+    def test_both_cloud_providers_at_once_is_an_error(self) -> None:
+        with pytest.raises(SettingsError, match="pick one"):
+            load_settings(
+                {
+                    **VERTEX,
+                    "CLAUDE_CODE_USE_BEDROCK": "1",
+                    "AWS_REGION": "us-east-1",
+                    "AWS_PROFILE": "dev",
+                }
+            )
 
 
 class TestTunables:
