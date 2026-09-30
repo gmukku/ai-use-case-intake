@@ -71,8 +71,15 @@ Two limits worth knowing before relying on it:
 
 ```bash
 npm run typecheck && npx eslint . && npm run build && npm test
+npm run test:e2e
 ```
 
 `npm run typecheck` runs `next typegen` first: `PageProps`, `LayoutProps` and `RouteContext`
 are generated into `.next/types`, which is gitignored, so a fresh checkout cannot typecheck
-without generating them. All four run in CI.
+without generating them. All of these run in CI.
+
+`test:e2e` drives the requester view in Chromium against `next start`, and **stubs the API in
+the browser** — no backend, no API key, no spend. That is not a shortcut: a real turn is
+non-deterministic, so there is nothing stable to assert on, and the cases worth testing (a
+frame split across network chunks, a stream that dies mid-JSON) are ones a healthy server will
+not produce on request. First run locally needs `npx playwright install chromium`.

@@ -18,6 +18,12 @@ __pycache__/
 node_modules/
 .next/
 
+# playwright: traces and screenshots from a failed run, and the html report
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # local run artifacts (hand-test snapshots and logs); promote to fixtures deliberately, not by default
 runs/
 logs/

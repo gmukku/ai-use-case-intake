@@ -811,6 +811,38 @@ Sliding window rather than fixed: a fixed window lets an attacker spend a full b
 end of one and another at the start of the next, so the real burst is double the configured
 limit at exactly the wrong moment. *`frontend/lib/server/rate-limit.ts`*
 
+### Stub the thing you cannot afford to be surprised by
+The requester e2e suite never touches a real backend, and that is the design rather than a
+compromise. A real turn costs money and needs the user's key; model output is
+non-deterministic, so there is nothing stable to assert on; and the cases actually worth
+testing — an SSE frame split mid-JSON, a stream that dies without a `done` — are ones a
+healthy server will not produce on demand. Stubbing is the only way to reach them.
+
+What that buys, which the unit tests structurally cannot: the SSE reader against a real
+`ReadableStream`, React state across a whole turn, and layout.
+
+What it costs, recorded in the deferred section rather than glossed: the contract between
+`lib/api.ts` and `blueprint.api` is now asserted twice, independently, and agreed nowhere. A
+change to the frame shape would pass both suites. *`frontend/e2e/`*
+
+### An assertion I could not make fail, said so rather than implied otherwise
+The geometry test — the reopen button must not end up behind the sticky composer — asserts a
+real invariant and is, on the evidence, untested. Three mutations were tried: remove the
+`pb-28` spacer, take the composer out of flow, both at once. It passed against all three.
+
+Getting there took two wrong hypotheses, both stated confidently before measuring. The first
+version compared the button's bottom against the *input's* bounding box, which is the wrong
+element: the composer bar's margin and padding begin about 50px above its input, so the button
+can sit behind the bar while the arithmetic reads as clear. Rewriting it as a hit test — ask
+the browser what a click at the button's centre would actually reach — is the right question,
+and still passes, because the centre stays clear even with both protections gone. Measured:
+button centre 633px, bar top around 647px.
+
+So it is labelled UNPROVEN in the file, as a tripwire for a future layout change rather than
+as a regression test for the bug that prompted it. The alternative was to keep quietly
+implying it guards something it has never been shown to guard, which is the same failure as
+the toothless test below, one level up. *`frontend/e2e/requester.spec.ts`*
+
 ### A test named after the thing it does not test
 Mutation testing the limiter caught five of six immediately and one survived: removing the
 `delete` before `set` that makes eviction recency-ordered. The test called
@@ -967,8 +999,10 @@ prototype should be (decided per output format in step 6).
   Deleting or demoting an account takes effect on the next request — `readSession` checks the
   account still exists with the same role — but there is no revocation list for "log this
   person out without touching their account".
-- **The requester UI still has no automated tests**, though `lib/server/auth.ts` now has 27.
-  Playwright against the real API is the remaining gap.
+- **The requester UI has 12 Playwright tests, all against a stubbed API.** Nothing exercises
+  the real backend end to end, so the contract between `lib/api.ts` and `blueprint.api` is
+  asserted twice independently and agreed nowhere. A change to the SSE frame shape would pass
+  both suites.
 - **The session registry is in-process**, so the API runs as exactly one worker. A second
   uvicorn worker would route a requester's follow-up to a process that has never heard of their
   session. The SQLite store is where a shared session lookup would live; until then this is a
