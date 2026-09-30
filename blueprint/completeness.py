@@ -130,6 +130,12 @@ def build_assessment_prompt(category: CanvasCategory, summary: str) -> str:
         f"# Summary to judge\n\n{summary.strip()}\n\n"
         "# Rules\n\n"
         "- Judge only what the summary states. Do not infer facts it does not contain.\n"
+        # Do not "strengthen" this into a blanket rule that a category-level denial satisfies
+        # every element. That was tried, and measured: it fixed `systems_explicit_none` and
+        # broke `systems_shared_folder_only` and `value_no_measure`, taking the MISSED gap rate
+        # from 0.0% to 7.1% — trading a redundant question for an unflagged gap, which is the
+        # wrong direction for the metric this suite is built around. The leniency also leaked
+        # into a category with no denial in it at all.
         "- An element is satisfied if the summary states it concretely, or explicitly says it "
         "does not apply.\n"
         "- Every rubric key must appear in exactly one of `satisfied` or `missing`.\n"

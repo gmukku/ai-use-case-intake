@@ -788,6 +788,39 @@ like it was not listening. Recorded in the case note, including the irony that `
 exists because inferring direction from verbs is unreliable, and this one case asks the checker
 to do exactly that. *`evals/completeness/cases.yaml`*
 
+### The eval rejected my fix, which is the whole point of having one
+A third run confirmed all four corrected labels — exact match 96.4%, zero unstable cases — and
+left one red line that was the *code* being wrong, not a label: with a bare denial and nothing
+concrete to point at, the checker reported both `system_integrations` elements missing. The
+loop-forever behaviour that case was written to catch. My earlier rewrite had not caused it;
+it removed the accidental crutch ("it is all in one shared folder") that was hiding it.
+
+The obvious fix — tell the checker that a category-level denial satisfies every element in it —
+worked on the target case and was still wrong:
+
+| | run 3 | with the fix |
+|---|---|---|
+| MISSED gap rate | 0.0% | **7.1%** |
+| invented gap rate | 3.6% | 0.0% |
+| exact match | 96.4% | 92.9% |
+
+It broke `systems_shared_folder_only` (the blanket rule swallowed the folder named in the same
+breath) and `value_no_measure` — a category containing no denial at all, where the added
+emphasis simply made the model more lenient. **An instruction written for one narrow case moved
+global behaviour**, which is the thing that makes prompt edits feel cheap and makes them
+expensive.
+
+Reverted, and the metric is why: the headline was chosen by consequence long before this run.
+A false positive costs a stakeholder one redundant question. A false negative sends a reviewer
+a spec with an unflagged gap. Trading the second for the first is a worse system that scores
+better on three of four numbers, and I would have shipped it if the suite reported only "exact
+match".
+
+The revert is a comment, not a deletion — the prompt string is byte-identical to run 3, so run
+3's numbers still describe the code and a fourth run was not needed. `systems_explicit_none`
+stays red, documented, rather than being reworded until it passes.
+*`blueprint/completeness.py`*, *`evals/completeness/cases.yaml`*
+
 ---
 
 ## Mistakes and what they taught

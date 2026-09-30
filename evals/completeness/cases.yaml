@@ -216,6 +216,17 @@
     live, which is a thing you can write to, so the case was testing two questions at once and
     failing the one it was not written for. The folder now has its own case below, and this
     one tests only what it says on the tin.
+
+    KNOWN FAILING, deliberately. With a bare denial and nothing concrete to point at, the
+    checker reports both elements missing — the loop-forever behaviour this case exists to
+    catch. A prompt fix was written and measured: adding "a category-level denial satisfies
+    every element" fixed this case and broke systems_shared_folder_only and value_no_measure,
+    taking the MISSED gap rate from 0.0% to 7.1%. The leniency leaked into a category with no
+    denial in it at all. Reverted.
+
+    The trade is deliberate and goes the cheaper way: this failure costs one redundant question
+    to a stakeholder, and the regression cost an unflagged gap reaching a reviewer. The case
+    stays red as an honest record rather than being reworded until it passes.
   summary: Nothing else is involved — no other systems or apps touch this at any point.
 
 - id: systems_shared_folder_only
