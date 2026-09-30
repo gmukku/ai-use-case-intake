@@ -110,17 +110,23 @@
 
 - id: value_no_measure
   category: value_proposition
-  expect_missing: [measurable_impact]
+  expect_missing: [core_problem, measurable_impact]
   note: |
     "Saves time" with nothing attached. The most common thin answer in this category and the
     one that makes a spec unfalsifiable.
 
-    Known to sit near the decision boundary, and kept there deliberately. core_problem is
-    labelled satisfied because "time" is one of the problems the rubric names, but the summary
-    states a benefit rather than a problem, and a checker can reasonably read it either way:
-    across four runs it has agreed 5 times and reported core_problem missing twice (once on
-    haiku, once on opus). Treat a single disagreement here as variance, not a regression —
-    which is also why one repeat cannot tell the two apart.
+    This label was corrected twice, and the second correction reversed the first. It
+    originally expected only measurable_impact, on the reading that "time" is one of the
+    problems the rubric lists. When one run disagreed it was recorded here as variance — the
+    wrong call, made from a single repeat. Two repeats then disagreed consistently, with the
+    same reasoning both times, and the checker's question is the one a consultant would ask:
+    "which specific task is slow and frustrating today?"
+
+    Naming a *category* of problem is not naming the problem. "It would save us time" states a
+    benefit and leaves the activity unsaid, and a spec cannot be built against it. The rubric
+    wording for core_problem — "The problem being solved (time, errors, risk, consistency,
+    cost)" — invites the generous reading by listing categories, and is worth tightening to
+    ask what activity is affected. Left as-is for now so this case keeps testing the boundary.
   summary: It would save us a lot of time and reduce the frustration.
 
 - id: value_measure_without_problem
@@ -149,6 +155,16 @@
     Products named, and each one's direction with them: "arrive through" and "reads" are
     reads, "go to" is a write. access_mode does not require the words read or write, only
     that the direction is recoverable.
+
+    Known unstable: opus agreed on one repeat and asked for access_mode on the other. The
+    label is kept on a production test rather than a vote — if a stakeholder has just said
+    signed copies go to SharePoint, asking "do you write to SharePoint?" is a question that
+    makes the agent look like it was not listening.
+
+    The irony is recorded on purpose: access_mode exists because inferring write access from
+    verbs is unreliable, and this label asks the checker to infer write access from verbs. It
+    is the one case in this category where that is the intended behaviour, which is exactly
+    why it is the unstable one.
   summary: Forms arrive through Greenhouse, signed copies go to SharePoint, payroll reads ADP.
 
 - id: systems_named_without_direction
@@ -194,6 +210,22 @@
     "Nothing else is involved" is a complete answer, not a gap, and it answers both elements
     at once — there is no system whose access mode could be described. A checker that treats
     an explicit none as missing would loop forever asking for a system that does not exist.
+
+    The summary used to end "; it is all in one shared folder", and the checker asked about
+    that folder's access mode on both repeats. It was right to: the clause named a place files
+    live, which is a thing you can write to, so the case was testing two questions at once and
+    failing the one it was not written for. The folder now has its own case below, and this
+    one tests only what it says on the tin.
+  summary: Nothing else is involved — no other systems or apps touch this at any point.
+
+- id: systems_shared_folder_only
+  category: system_integrations
+  expect_missing: [access_mode]
+  note: |
+    Split out of systems_explicit_none after the eval found it. A stakeholder can say "nothing
+    else is involved" and name a storage location in the same breath, and the second half is
+    the one that matters: a shared folder that gets written to is a write target, whatever the
+    first half framed it as. Found consistently across both repeats, not a one-off.
   summary: Nothing else is involved; it is all in one shared folder.
 
 # --- input_source -------------------------------------------------------------------------

@@ -754,10 +754,39 @@ process has. The principle I reasoned from (the two elements are independent) wa
 stretched it to make a vague answer count as a clear one, which is the failure mode of writing
 labels and implementation in the same sitting.
 
-The other disagreement went the other way. `value_no_measure` has now agreed 5 times and
-disagreed twice across four runs — it sits on a genuine boundary, and the label stays. One
-repeat cannot distinguish a real disagreement from variance, which is an argument for
-`--repeats 2` before believing any single red line. *`evals/completeness/cases.yaml`*
+The other disagreement I called variance and left alone. **That was wrong, and the next run
+proved it** — see below. One repeat cannot distinguish a real disagreement from variance, and
+the failure mode is not only believing a red line too readily; it is also dismissing one.
+*`evals/completeness/cases.yaml`*
+
+### Two repeats, three reversals
+Re-running with `--repeats 2` (54 calls, $0.43, 0 errors) settled every open question and
+overturned two of my own conclusions.
+
+**Confirmed:** the corrected `systems_vague_our_system` label matched on both repeats. The
+eval was right and I was wrong, and now it is demonstrated rather than argued.
+
+**Reversed:** `value_no_measure` disagreed on *both* repeats, with the same reasoning each
+time, having disagreed on the previous single run too. I had written it off as variance from
+one data point and a vote count across models. Three consecutive consistent disagreements plus
+a defensible argument beats a vote: naming a *category* of problem ("time") is not naming the
+problem, and "it would save us time" leaves the activity unsaid. The label was corrected.
+The vote count was never the evidence — the reasoning was, and I should have weighed it first.
+
+**Second-order effects:** `systems_explicit_none` failed on both repeats, and it was the case
+that was wrong, not the checker. Its summary ended "; it is all in one shared folder" — written
+when the category had one element, so nobody had asked what the folder's access mode was. The
+rubric split turned an unremarkable clause into a second question, and the case was silently
+testing two things. Split into a pure none and a `systems_shared_folder_only` case that expects
+`access_mode`. **Changing a rubric re-labels every case that touches it**, and the ones that
+break are not always the ones that look related.
+
+**Knowingly unstable:** `systems_named_products` agreed once and disagreed once. The label
+stays, decided on a production test rather than the count — if a stakeholder has just said
+signed copies go to SharePoint, asking whether they write to SharePoint makes the agent look
+like it was not listening. Recorded in the case note, including the irony that `access_mode`
+exists because inferring direction from verbs is unreliable, and this one case asks the checker
+to do exactly that. *`evals/completeness/cases.yaml`*
 
 ---
 
