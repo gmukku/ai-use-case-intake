@@ -725,6 +725,40 @@ because `runs/` holds specs written by more than one version of this program —
 drifting keys again, handled at the boundary this time instead of after a crash.
 *`blueprint/review.py`*, *`frontend/app/components/ReviewDetail.tsx`*
 
+### A harness that scores its own failures measures the weather
+The first run after the rubric split reported three disagreements. One of them read
+`[invented] systems_explicit_none — expected [], got []`: a call that disagreed with itself.
+It was a 529 from the API, and the error path had been setting `missed=expected` — inventing a
+verdict for a call that never returned.
+
+That is not a cosmetic bug. `missed_rate` is the single metric this suite exists to protect,
+and any 529 landing on a case with a non-empty expected list would have reported it as a
+missed gap. This run escaped only because the error happened to hit the one case whose
+expected list is empty. I would have spent the next hour hunting a checker regression that was
+an outage.
+
+Errors are now counted and reported separately and dropped from every rate. Replaying the same
+run through the fixed summariser moved exact match from 88.9% to 92.3% — the old number was
+dividing by a call that never happened. The rule generalises past evals: a measurement that
+moves for reasons unrelated to what it measures is worse than no measurement, because it is
+trusted. *`evals/completeness/run.py`*
+
+### The eval corrected the label, exactly as it is supposed to
+`systems_vague_our_system` expected only `systems_named`; I had argued in the case note that
+"the data ends up in our system eventually" states a write plainly, so `access_mode` was
+satisfied. The checker disagreed and asked "do you only read from them or also create/update
+records in them?" — which is the question a consultant would ask, and I was wrong.
+
+"Ends up in ... eventually" is a stakeholder describing where data drifts, not the access their
+process has. The principle I reasoned from (the two elements are independent) was sound; I
+stretched it to make a vague answer count as a clear one, which is the failure mode of writing
+labels and implementation in the same sitting.
+
+The other disagreement went the other way. `value_no_measure` has now agreed 5 times and
+disagreed twice across four runs — it sits on a genuine boundary, and the label stays. One
+repeat cannot distinguish a real disagreement from variance, which is an argument for
+`--repeats 2` before believing any single red line. *`evals/completeness/cases.yaml`*
+
 ---
 
 ## Mistakes and what they taught

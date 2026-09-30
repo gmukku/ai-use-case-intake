@@ -86,7 +86,11 @@ async def run_case(case: dict[str, Any], model: str, repeat: int) -> CallResult:
             category=category.value,
             expected_missing=expected,
             predicted_missing=[],
-            missed=expected,
+            # Not `missed=expected`. A call that never returned has no verdict to compare, and
+            # recording one as a missed gap puts API weather into the single metric this suite
+            # exists to protect — a 529 would read as a checker regression. Errors are counted
+            # and reported on their own; `summarize` drops them from every rate.
+            missed=[],
             invented=[],
             exact=False,
             sufficient_agreement=False,
@@ -118,16 +122,21 @@ async def run_case(case: dict[str, Any], model: str, repeat: int) -> CallResult:
 def summarize(results: list[CallResult]) -> dict[str, dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for variant, group in by_variant(results).items():
-        n = len(group)
+        # Every rate is over the calls that actually returned a verdict. An errored call is
+        # counted (timing_and_cost reports `errors`) but never scored: including it would let
+        # an API outage move accuracy in either direction, and a metric that moves for reasons
+        # unrelated to what it measures is worse than no metric.
+        scored = [r for r in group if not r.error]
+        n = len(scored)
         keys = sorted({k for c in CanvasCategory for k in (e.key for e in CATEGORY_RUBRIC[c])})
         per_key = {}
         for key in keys:
-            tp = sum(1 for r in group if key in r.expected_missing and key in r.predicted_missing)
+            tp = sum(1 for r in scored if key in r.expected_missing and key in r.predicted_missing)
             fp = sum(
-                1 for r in group if key not in r.expected_missing and key in r.predicted_missing
+                1 for r in scored if key not in r.expected_missing and key in r.predicted_missing
             )
             fn = sum(
-                1 for r in group if key in r.expected_missing and key not in r.predicted_missing
+                1 for r in scored if key in r.expected_missing and key not in r.predicted_missing
             )
             if tp or fp or fn:
                 per_key[key] = {
@@ -138,40 +147,53 @@ def summarize(results: list[CallResult]) -> dict[str, dict[str, Any]]:
 
         # Stability: did every repeat of a case give the same verdict?
         by_case: dict[str, set[frozenset[str]]] = {}
-        for r in group:
+        for r in scored:
             by_case.setdefault(r.case_id, set()).add(frozenset(r.predicted_missing))
 
         summary[variant] = {
             **timing_and_cost(group),
-            "missed_rate": sum(1 for r in group if r.missed) / n,
-            "invented_rate": sum(1 for r in group if r.invented) / n,
-            "exact_match": sum(r.exact for r in group) / n,
-            "sufficient_agreement": sum(r.sufficient_agreement for r in group) / n,
-            "gaps_missed": sum(len(r.missed) for r in group),
-            "gaps_invented": sum(len(r.invented) for r in group),
+            "scored": n,
+            "missed_rate": sum(1 for r in scored if r.missed) / n if n else None,
+            "invented_rate": sum(1 for r in scored if r.invented) / n if n else None,
+            "exact_match": sum(r.exact for r in scored) / n if n else None,
+            "sufficient_agreement": sum(r.sufficient_agreement for r in scored) / n if n else None,
+            "gaps_missed": sum(len(r.missed) for r in scored),
+            "gaps_invented": sum(len(r.invented) for r in scored),
             "per_key": per_key,
             "unstable_cases": sorted(c for c, preds in by_case.items() if len(preds) > 1),
             "n_unstable": sum(1 for preds in by_case.values() if len(preds) > 1),
-            "wrong_cases": sorted({r.case_id for r in group if not r.exact}),
-            "missed_cases": sorted({r.case_id for r in group if r.missed}),
+            "wrong_cases": sorted({r.case_id for r in scored if not r.exact}),
+            "missed_cases": sorted({r.case_id for r in scored if r.missed}),
         }
     return summary
 
 
 def print_disagreements(results: list[CallResult]) -> None:
-    wrong = [r for r in results if not r.exact]
+    """Disagreements and failures, in separate sections.
+
+    They were one list once, which printed a call that never ran as
+    ``[invented] ... expected [], got []`` — a disagreement with itself. A failure to get an
+    answer and a wrong answer call for different work, so they are not shown as one thing.
+    """
+    failed = [r for r in results if r.error]
+    if failed:
+        print(f"\n{len(failed)} call(s) failed and were not scored:\n")
+        for r in sorted(failed, key=lambda r: (r.case_id, r.variant)):
+            print(f"  [error] {r.case_id} · {r.variant} (repeat {r.repeat})")
+            print(f"      {r.error}")
+        print()
+
+    wrong = [r for r in results if not r.exact and not r.error]
     if not wrong:
-        print("\nEvery call matched its label.")
+        print("Every scored call matched its label.\n")
         return
-    print(f"\n{len(wrong)} call(s) disagreed with the labels:\n")
+    print(f"{len(wrong)} call(s) disagreed with the labels:\n")
     for r in sorted(wrong, key=lambda r: (not r.missed, r.case_id, r.variant)):
         mark = "MISSED" if r.missed else "invented"
         print(f"  [{mark}] {r.case_id} · {r.variant} (repeat {r.repeat})")
         print(f"      expected {r.expected_missing or '[]'}, got {r.predicted_missing or '[]'}")
         if r.question:
             print(f"      would have asked: {r.question}")
-        if r.error:
-            print(f"      error: {r.error}")
     print()
 
 
@@ -211,7 +233,8 @@ async def main() -> int:
         summary,
         [
             ("calls", "{calls}"),
-            ("errors", "{errors}"),
+            ("errors (unscored)", "{errors}"),
+            ("scored", "{scored}"),
             ("MISSED gap rate", "{missed_rate:.1%}"),
             ("invented gap rate", "{invented_rate:.1%}"),
             ("exact match", "{exact_match:.1%}"),

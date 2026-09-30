@@ -114,6 +114,13 @@
   note: |
     "Saves time" with nothing attached. The most common thin answer in this category and the
     one that makes a spec unfalsifiable.
+
+    Known to sit near the decision boundary, and kept there deliberately. core_problem is
+    labelled satisfied because "time" is one of the problems the rubric names, but the summary
+    states a benefit rather than a problem, and a checker can reasonably read it either way:
+    across four runs it has agreed 5 times and reported core_problem missing twice (once on
+    haiku, once on opus). Treat a single disagreement here as variance, not a regression —
+    which is also why one repeat cannot tell the two apart.
   summary: It would save us a lot of time and reduce the frustration.
 
 - id: value_measure_without_problem
@@ -166,12 +173,18 @@
 
 - id: systems_vague_our_system
   category: system_integrations
-  expect_missing: [systems_named]
+  expect_missing: [systems_named, access_mode]
   note: |
     "Our system" is exactly what a reviewer sent a spec back for in step 5. The checker
-    should have caught it before the reviewer had to. access_mode is *not* missing here: "ends
-    up in" states a write plainly. The two elements are independent, and a checker that fails
-    both because one is vague is over-reporting.
+    should have caught it before the reviewer had to.
+
+    This label was wrong on its first run and the eval corrected it. It originally expected
+    only systems_named, arguing that "ends up in" states a write plainly and that the two
+    elements are independent. The independence is real; the reading was not. "Ends up in ...
+    eventually" is a stakeholder describing where data drifts, not the access their process
+    has — it says nothing about whether the process also reads from the system, or whether
+    records are created or updated. The checker asked "do you only read from them or also
+    create/update records in them?", which is the question a consultant would ask.
   summary: The data ends up in our system eventually.
 
 - id: systems_explicit_none
