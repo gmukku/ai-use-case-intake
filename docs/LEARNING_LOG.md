@@ -811,6 +811,55 @@ Sliding window rather than fixed: a fixed window lets an attacker spend a full b
 end of one and another at the start of the next, so the real burst is double the configured
 limit at exactly the wrong moment. *`frontend/lib/server/rate-limit.ts`*
 
+### A simulated stakeholder has to be bad at answering, or it measures nothing
+The end-to-end evals need someone for the discovery agent to interview, and the hard part is
+not making that someone answer. It is making them answer *badly enough to be realistic*.
+
+A model asked to play a stakeholder will, left alone, produce a tidy briefing covering all
+seven categories in its first message. That scores the discovery agent at 100% completeness
+regardless of how the agent behaves, because the agent never has to ask for anything — the
+measurement would be of the fixture. So the persona prompt's single load-bearing instruction
+is "answer ONLY what you were just asked; never bring up something nobody asked about", said
+first and said to matter more than the rest.
+
+The other half is that each persona carries ground truth for all seven categories, which is
+what makes scoring possible with no model grading anything: the eval knows what a complete
+conversation should have surfaced, because it wrote the person who knows it. A persona missing
+one category is rejected at load — otherwise completeness is unreachable by construction and
+the run reports the fixture's gap as the agent's failure, which is a number that looks like a
+finding and is not.
+
+Six personas chosen by *shape* rather than subject: a write into a named system, a read-only
+integration, a request touching nothing, a refusal to share samples, a multi-department
+request, and someone who has not thought it through. Six that differ in what the agent has to
+do beat twenty that differ only in industry.
+*`evals/e2e/simulator.py`*, *`evals/e2e/personas.yaml`*
+
+### The isolation scanner was only looking where the bugs used to be
+`tests/test_isolation.py` walks every `ClaudeAgentOptions(` in the package and requires
+`setting_sources=[]` and `env=AGENT_ENV`. The simulator is an agent, spawns a CLI subprocess
+like any other, and lives in `evals/` — outside what the scanner walked.
+
+That is not hypothetical tidiness. A simulator inheriting the developer's `CLAUDE.md` would be
+reading the answer sheet: the project brief lists the seven canvas categories by name, and the
+eval exists to check the agent discovers them without being told. The scanner now covers
+`evals/` too, and the simulator asserts its own options at runtime as well, because a scanner
+is a text search and the thing it guards is worth two checks.
+
+The general shape: a guard written after a specific incident covers where that incident
+happened. New code arrives somewhere else. *`tests/test_isolation.py`*
+
+### Two lists that must agree, again, and I wrote the wrong one
+A test asserting that each persona's `expect_flags` are real risk-flag keys hardcoded the set
+of keys. Three of the seven I wrote down do not exist — `external_sharing`,
+`automation_without_review`, `web_grounding` — and two that do were missing,
+`external_sources` and `workflow_automation`.
+
+The personas happened to use only real keys, so nothing was broken, and the test would have
+passed while permitting three fictional names. It now reads the keys out of `review.py`, the
+same source-scanning technique `test_isolation.py` uses. This is the second entry in this log
+titled after the same rule, which is the point of keeping it. *`tests/test_simulator.py`*
+
 ### Stub the thing you cannot afford to be surprised by
 The requester e2e suite never touches a real backend, and that is the design rather than a
 compromise. A real turn costs money and needs the user's key; model output is
@@ -1003,6 +1052,15 @@ prototype should be (decided per output format in step 6).
   the real backend end to end, so the contract between `lib/api.ts` and `blueprint.api` is
   asserted twice independently and agreed nowhere. A change to the SSE frame shape would pass
   both suites.
+- **The e2e eval has never been run.** `evals/e2e/` drives whole conversations against
+  simulated stakeholders, and everything deterministic about it is unit-tested, but no paid
+  run has happened — so the conversation loop itself is unproven against a live session, and
+  the personas have never been shown to be answerable by a real agent. First run is ~$2.40.
+- **The e2e eval scores two of CLAUDE.md's four measures.** Discovery completeness and the
+  risk-gate false-negative check are deterministic and done. The rubric-scored judge
+  comparison against a gold spec (completeness / accuracy / actionability) is not built; it
+  needs a gold spec per persona, and the transcripts from a first run are the right input for
+  writing them.
 - **The session registry is in-process**, so the API runs as exactly one worker. A second
   uvicorn worker would route a requester's follow-up to a process that has never heard of their
   session. The SQLite store is where a shared session lookup would live; until then this is a

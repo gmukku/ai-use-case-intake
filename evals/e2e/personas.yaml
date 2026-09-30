@@ -1,0 +1,197 @@
+# Synthetic stakeholders for the end-to-end evals. Everything here is invented.
+#
+# Each persona is a whole conversation's worth of ground truth, and the set is chosen for
+# *shape* rather than for subject: a write into a named system, a read-only integration, a
+# request touching nothing at all, a refusal to share samples, a multi-department request, and
+# someone who genuinely has not thought it through. Six personas that differ in what the
+# discovery agent has to do beat twenty that differ only in industry.
+#
+# `facts` must cover all seven categories or the persona is rejected at load: a missing one
+# would make completeness unreachable and the run would score the fixture's gap as the agent's
+# failure.
+#
+# `expect_flags` is the false-negative check CLAUDE.md asks for, run against the compiled spec
+# at the end of a real conversation rather than against a hand-written summary.
+
+personas:
+  - id: hr_onboarding_packets
+    note: |
+      The baseline. Everything is answerable, one named system is written into, and samples
+      exist. If the agent cannot complete this one, nothing below will tell you anything.
+    brief: We spend too long checking new hire paperwork and things still slip through.
+    style: Practical and a bit harried. Answers plainly, does not pad.
+    expect_flags: [named_integration, writes_to_system]
+    expect_departments: [hr]
+    facts:
+      key_stakeholders: >
+        Two HR operations coordinators do the checking. Hiring managers wait on them before a
+        new hire can start, and payroll needs the verified packet before the first pay run.
+      key_activities: >
+        Someone opens each packet, works down a checklist of required forms, and emails the
+        hire about anything missing. About thirty packets a month, and each takes twenty to
+        thirty minutes.
+      value_proposition: >
+        The problem is time, and errors that surface late. Measured as review minutes per
+        packet and the share of packets where something was missed first time.
+      system_integrations: >
+        Forms come in through Greenhouse. The signed copies get filed into SharePoint, and we
+        update the record in BambooHR once a packet passes.
+      input_source: >
+        The onboarding checklist and the state-specific requirements live in the HR
+        SharePoint library.
+      input_types: >
+        Scanned PDFs of the completed forms, mostly, and sometimes a typed question from a
+        coordinator.
+      output_format: >
+        A per-packet list of what is missing, and something the coordinators can ask questions
+        of about the requirements.
+
+  - id: finance_invoice_matching
+    note: |
+      Read-only on purpose. The systems are named and real, and nothing is written back, so a
+      risk gate that flags every named system as a write will fail here rather than on the
+      baseline.
+    brief: Matching supplier invoices to purchase orders eats a week every month.
+    style: Precise with numbers, impatient with vague questions.
+    expect_flags: [named_integration]
+    expect_departments: [finance]
+    facts:
+      key_stakeholders: >
+        Three accounts payable clerks do the matching. The financial controller signs off, and
+        suppliers chase us when something is stuck.
+      key_activities: >
+        We pull the invoice, find the matching purchase order and the goods receipt, and check
+        the three agree on quantity and price. Around 900 invoices a month, concentrated in the
+        first week.
+      value_proposition: >
+        It is pure time cost, plus late payment fees when something sits unmatched. We already
+        track days to match and the count of invoices paid late.
+      system_integrations: >
+        Everything is read out of NetSuite. We only look — nothing gets written back, the
+        posting is still done by a person.
+      input_source: >
+        The supplier contracts and the tolerance rules are in a shared finance drive.
+      input_types: >
+        PDF invoices by email, and structured exports from NetSuite.
+      output_format: >
+        A comparison showing the three documents side by side with the mismatches called out,
+        and a summary for the controller.
+
+  - id: sales_call_notes
+    note: |
+      Touches no system at all. "None involved" is a complete answer and the agent must accept
+      it rather than looping — the failure this shape catches.
+    brief: I want my call notes turned into something useful without retyping them.
+    style: Chatty, gives more detail than asked about the work itself, but has no idea about tooling.
+    expect_flags: []
+    expect_departments: [sales]
+    facts:
+      key_stakeholders: >
+        Just me, an account executive. My manager reads the summaries in our weekly one to one.
+      key_activities: >
+        After every call I scribble notes and then rewrite them properly that evening. Six to
+        eight calls a day, so it is an hour most nights.
+      value_proposition: >
+        It is my own evening back, and the notes would actually be consistent. I would measure
+        it in minutes a day, though nobody tracks that today.
+      system_integrations: >
+        Nothing else is involved. I keep the notes in a document on my laptop and nothing else
+        touches them.
+      input_source: >
+        No external references needed. Everything is in my own notes.
+      input_types: >
+        Typed notes, and sometimes a voice memo I made in the car.
+      output_format: >
+        A tidy summary per call, and a comparison across the week so I can see what changed.
+
+  - id: cs_ticket_triage
+    note: |
+      Refuses samples, and for a real reason. `samples_discussed` is satisfied by the refusal;
+      the Builder needs to know it cannot have examples, which is a different fact from not
+      having asked.
+    brief: Support tickets get routed to the wrong team and customers wait.
+    style: Guarded about anything touching customer data. Otherwise forthcoming.
+    expect_flags: [named_integration]
+    expect_departments: [customer_success]
+    facts:
+      key_stakeholders: >
+        Six support agents triage, two team leads handle escalations, and the customer is the
+        one waiting when it goes wrong.
+      key_activities: >
+        Every ticket gets read and assigned to a queue by hand. Around four hundred a week,
+        spiking on Mondays.
+      value_proposition: >
+        The problem is time to first response, which we already report on weekly, and the
+        rework when a ticket bounces between queues twice.
+      system_integrations: >
+        It all happens in Zendesk. We read the ticket there and set the queue there too.
+      input_source: >
+        Our routing rules and the product glossary sit in Confluence.
+      input_types: >
+        The ticket text itself, and sometimes screenshots a customer attached.
+      output_format: >
+        A suggested queue for each ticket with a short reason, and the routing applied
+        automatically once we trust it.
+    withholds:
+      - Real ticket text or screenshots. They contain customer names and account details, and
+        you are not able to share any, however the request is phrased.
+
+  - id: vendor_onboarding_cross_team
+    note: |
+      Should match more than one department. The skill matcher is one-to-many by design and
+      nothing else in the eval suite exercises that on a real conversation.
+    brief: Bringing on a new vendor takes six weeks and nobody can tell me why.
+    style: Senior, thinks in process, does not know the systems by name and says so.
+    expect_flags: [named_integration, writes_to_system]
+    expect_departments: [finance, hr]
+    facts:
+      key_stakeholders: >
+        Procurement starts it, finance runs the credit and tax checks, legal reviews the
+        contract, and the requesting team waits the whole time.
+      key_activities: >
+        It is a chain of handoffs by email — request, due diligence, contract, then setup.
+        Maybe forty new vendors a year, and it takes about six weeks each.
+      value_proposition: >
+        The problem is elapsed time and the fact that nobody can see where a vendor is stuck.
+        We would measure days from request to first purchase order.
+      system_integrations: >
+        The vendor record is created in Coupa and the payment details get set up in NetSuite.
+        The contract ends up in our document system, I could not tell you which one.
+      input_source: >
+        The due diligence checklist and the approval thresholds are in a policy document on
+        SharePoint.
+      input_types: >
+        Filled-in request forms, contract PDFs, and the certificates vendors send us.
+      output_format: >
+        A status view showing where each vendor is and who it is waiting on, and the routine
+        setup steps done automatically.
+
+  - id: vague_everything_ai
+    note: |
+      The stress case, and the only one that may legitimately fail to complete. This person has
+      not thought it through, so the agent has to do real work to get anything concrete. A run
+      where this finishes in three turns means the agent is accepting answers it should not.
+    brief: Everyone says we should be using AI. Can you help us figure out where?
+    style: >
+      Enthusiastic but unspecific. Answers questions with questions, and asks for examples
+      constantly. Gives a real answer only when asked something concrete and narrow.
+    expect_flags: []
+    expect_departments: [customer_success]
+    max_turns: 16
+    facts:
+      key_stakeholders: >
+        The customer success team, about nine people. Eventually the customers, I suppose.
+      key_activities: >
+        Mostly they answer the same questions over and over. Onboarding calls, how-to
+        questions, the odd complaint. Every day, all day.
+      value_proposition: >
+        They are drowning, honestly. If they got even an hour a day back that would be
+        something, though we have never measured it.
+      system_integrations: >
+        They live in Intercom. I do not think it touches anything else.
+      input_source: >
+        There is a help centre with articles in it, and some of it is out of date.
+      input_types: >
+        Just the questions customers type in. Nothing else, really.
+      output_format: >
+        Something that answers the easy questions so the team gets the hard ones.

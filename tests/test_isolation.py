@@ -30,9 +30,20 @@ def _option_blocks(source: str) -> list[str]:
     return blocks
 
 
+def _agent_sources() -> list[Path]:
+    """Every file in this repo that may construct an agent.
+
+    `evals/` is included, and was not until the stakeholder simulator was written. The
+    simulator spawns a CLI subprocess like any other agent, and one that inherited the
+    developer's CLAUDE.md would be reading the answer sheet: the project brief describes the
+    seven canvas categories the eval exists to check the agent discovers for itself.
+    """
+    return sorted(PACKAGE.glob("*.py")) + sorted(PACKAGE.parent.glob("evals/**/*.py"))
+
+
 def test_every_agent_is_isolated() -> None:
     checked = 0
-    for path in sorted(PACKAGE.glob("*.py")):
+    for path in _agent_sources():
         source = path.read_text(encoding="utf-8")
         for block in _option_blocks(source):
             if "import" in block[:40]:  # a type annotation, not a construction
@@ -40,8 +51,8 @@ def test_every_agent_is_isolated() -> None:
             checked += 1
             assert "setting_sources=[]" in block, f"{path.name}: options without setting_sources=[]"
             assert "env=AGENT_ENV" in block, f"{path.name}: options without env=AGENT_ENV"
-    assert checked >= 5, (
-        "expected to find the discovery, classifier, checker, spec, builder options"
+    assert checked >= 6, (
+        "expected the discovery, classifier, checker, spec, builder and simulator options"
     )
 
 
