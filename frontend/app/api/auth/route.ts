@@ -8,6 +8,7 @@ import {
   issueSession,
   readSession,
 } from "@/lib/server/auth";
+import { checkLogin, clientIp, recordFailure, recordSuccess } from "@/lib/server/rate-limit";
 
 /** Who is signed in, if anyone. Used by the UI to show a name and a sign-out link. */
 export async function GET(): Promise<Response> {
@@ -38,12 +39,25 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ detail: "Username and password are required." }, { status: 422 });
   }
 
+  // Before any password work, so a throttled attacker cannot keep spending scrypt time. The
+  // limit is on attempts, not on accounts: nothing here has looked in the user store yet.
+  const ip = clientIp(request);
+  const budget = checkLogin(username, ip);
+  if (!budget.allowed) {
+    return Response.json(
+      { detail: "Too many sign-in attempts. Try again shortly." },
+      { status: 429, headers: { "Retry-After": String(budget.retryAfterS) } },
+    );
+  }
+
   const session = await authenticate(username, password);
   if (!session) {
+    recordFailure(username, ip);
     // One message for both failures: saying which was wrong tells an attacker which usernames
     // exist. `authenticate` also spends the same time either way.
     return Response.json({ detail: "Those details did not match." }, { status: 401 });
   }
+  recordSuccess(username);
 
   const token = issueSession(session);
   if (!token) {

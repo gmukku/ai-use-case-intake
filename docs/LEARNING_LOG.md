@@ -788,6 +788,51 @@ like it was not listening. Recorded in the case note, including the irony that `
 exists because inferring direction from verbs is unreliable, and this one case asks the checker
 to do exactly that. *`evals/completeness/cases.yaml`*
 
+### Rate limiting: two budgets, because either alone has an obvious defeat
+Keying only on the address means one office behind a NAT shares a budget and a botnet ignores
+it. Keying only on the username hands an attacker a denial-of-service: know a username, lock
+that person out. Both, counted independently, and a success clears the username's budget but
+not the address's — otherwise one compromised account resets an attacker's whole allowance on
+demand.
+
+Three things that are security bugs rather than details:
+
+- **The counter keys on any submitted username**, existing or not. Counting only real accounts
+  would make a fast 429 mean "this account exists", handing back the enumeration oracle that
+  `authenticate`'s decoy hash is there to close.
+- **The check runs before `authenticate`**, so a throttled attacker stops spending scrypt time.
+  Checking afterwards would limit the answers while leaving the CPU cost unbounded.
+- **The map is bounded.** Keys come from a request header, so an attacker picks them; an
+  unbounded map is memory exhaustion reachable by anyone who can load the login page. Eviction
+  is by recency and errs safe — forgetting an old key forgives past attempts, it never invents
+  new ones.
+
+Sliding window rather than fixed: a fixed window lets an attacker spend a full budget at the
+end of one and another at the start of the next, so the real burst is double the configured
+limit at exactly the wrong moment. *`frontend/lib/server/rate-limit.ts`*
+
+### A test named after the thing it does not test
+Mutation testing the limiter caught five of six immediately and one survived: removing the
+`delete` before `set` that makes eviction recency-ordered. The test called
+`evicts by recency, not by first sight` did not notice.
+
+Reading it afterwards, the reason is embarrassing and obvious. It built a window with a limit
+of 5, recorded two hits, and asserted the key was still *allowed* — which is true whether the
+key survived eviction or was dropped entirely. The assertion held in both worlds. The name
+described an intent the code never checked.
+
+The fix was to put the key *at* its limit, so eviction flips the answer from refused to
+allowed and the two worlds are distinguishable. That is the general shape: an assertion only
+tests something if there is a reachable state where it fails.
+
+Two meta-lessons, both already in this log and both re-learned anyway. First, this is the
+fourth entry about a test that could not fail. Second, my mutation runner reported all six
+mutants CAUGHT on its first run while measuring nothing — the regex never matched, and I had
+mapped "could not read a result" to "caught". Same false-pass shape as
+`grep ... && echo FOUND`, in the tool built to catch exactly this. It now takes a green
+baseline first and reports an unreadable run as an error, loudly.
+*`frontend/lib/server/rate-limit.test.ts`*
+
 ### The eval rejected my fix, which is the whole point of having one
 A third run confirmed all four corrected labels — exact match 96.4%, zero unstable cases — and
 left one red line that was the *code* being wrong, not a label: with a bare denial and nothing
@@ -867,6 +912,8 @@ stays red, documented, rather than being reworded until it passes.
 | Chased a blank screenshot through two "fixes" to `scrollIntoView` before measuring anything. The blankness was a capture artifact; the real bug was beside it, a sticky composer floating over the last element on the page and hiding the reopen button completely. | Measure first. One `getBoundingClientRect()` on the two elements answered what two guesses had not. The scroll changes were kept because they are right for other reasons, which is not the same as having been diagnosed. |
 | Ran uvicorn with `--reload` to save restarts; every session create then failed with an empty `CLIConnectionError`. The reloader runs the app in a `multiprocessing` spawn child and the SDK could not start its CLI from there. | An empty error message is still evidence — it placed the failure in spawning rather than in our code, and the surviving process's command line named the cause outright. Convenience flags change the process tree, which matters when the app's whole job is spawning processes. |
 | `POST /builds` guarded with "is a build running?", which read as idempotent and was not: between two requests the first build finished, so the second started a fresh one and overwrote a ~$0.46 workspace. | The test I wrote to confirm the guard is what disproved it — the assertion I expected to be trivial (`len(build_calls) == 1`) was the one that failed. State that changes on its own needs the *finished* case handled explicitly, not just the in-flight one. |
+| Wrote a mutation-testing script that reported all six mutants CAUGHT while measuring nothing: its regex never matched the test runner's summary, and "could not read a result" was mapped to "caught". | The fourth entry in this log about a check whose failure mode is a false pass, and this time it was inside the tool built to catch exactly that. A harness now needs a green baseline before it is believed, and an unreadable run is an error, never a pass. |
+| Used TypeScript constructor parameter properties in a file loaded by `node --test`. `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`: Node strips types, it does not compile them, and a parameter property emits an assignment. | The runtime's TypeScript support is a subset, and "TypeScript" is not one thing. Cheap to fix, and a reason the tests run through the same loader production uses rather than through a compiler that would have hidden it. |
 | Rewrote history to remove a previous employer's name from 38 commits, verified it, reported it done — then quoted the name back into this log four commits later, inside the entry describing that very rewrite, and pushed it to a public repo. It sat there until I was asked why `.gitignore` was tracked. | The removal was never the fix; the standing check is. A verification that runs once answers a question about the past and promises nothing about the future, which is the same shape as the `p95` and `writes_to_system` entries above: something was confirmed at a moment and then treated as permanently true. CI now fails on the name in the working tree *or* in any diff, proven by running it before the rewrite (fail, history 2) and after (pass, 0 and 0). |
 | Wrote a `.gitignore` comment explaining that `CLAUDE.md` "names a previous employer" — which does not name them, and tells any reader there is something worth looking for. | A comment in a tracked file is published. A rule that hides something should not document what it hides. Say what to ignore, not why. |
 
@@ -912,8 +959,10 @@ prototype should be (decided per output format in step 6).
 
 ### Deployment shape
 
-- **Auth has no rate limiting.** scrypt makes each attempt expensive, but nothing caps how many
-  attempts `/api/auth` will take.
+- **The sign-in throttle is in-process and trusts a header.** Two independent budgets now cap
+  `/api/auth` (see below), but two Next instances means two budgets, and `x-forwarded-for` is
+  spoofable without a proxy that overwrites it. The per-username budget is the one that holds
+  under both, which is why it exists.
 - **Signing out a user you want to keep** still means rotating `BLUEPRINT_SESSION_SECRET`.
   Deleting or demoting an account takes effect on the next request — `readSession` checks the
   account still exists with the same role — but there is no revocation list for "log this
