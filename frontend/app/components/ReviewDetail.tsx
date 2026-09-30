@@ -13,6 +13,42 @@ const ACTIONS: { action: Action; label: string; hint: string }[] = [
   { action: "reject", label: "Reject", hint: "Stop here; nothing gets built." },
 ];
 
+/**
+ * Build readiness, which is deliberately not risk.
+ *
+ * The completeness rubric counts both of these questions as *answered*: "I cannot share real
+ * packets, they have SSNs on them" satisfies `samples_discussed`, and a named metric with no
+ * number satisfies `measurable_impact`. Neither is a gap to chase. But a refusal and a promise
+ * leave the Builder in entirely different positions, and a metric with no baseline cannot show
+ * whether the prototype helped — and a reviewer previously had to dig both out of the canvas
+ * prose to notice. `ok: false` means "worth knowing", never "wrong".
+ */
+const SAMPLES = {
+  offered: { text: "Samples available", ok: true },
+  unavailable: { text: "No samples available", ok: false },
+  not_discussed: { text: "Samples not discussed", ok: false },
+} as const;
+
+const IMPACT = {
+  quantified: { text: "Impact quantified", ok: true },
+  named_only: { text: "Metric named, no baseline", ok: false },
+  none_stated: { text: "No measure stated", ok: false },
+} as const;
+
+function ReadinessChip({ text, ok }: { text: string; ok: boolean }) {
+  return (
+    <span
+      className={`rounded-full border px-2.5 py-0.5 text-xs ${
+        ok
+          ? "border-line text-muted"
+          : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+      }`}
+    >
+      {text}
+    </span>
+  );
+}
+
 export default function ReviewDetail({ sessionId }: { sessionId: string }) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -105,6 +141,12 @@ export default function ReviewDetail({ sessionId }: { sessionId: string }) {
               <RiskBadge level={spec.risk.level} scrutiny={spec.risk.needs_extra_scrutiny} />
             </div>
             <p className="text-[15px] leading-relaxed text-muted">{spec.narrative}</p>
+            {(spec.samples || spec.impact) && (
+              <div className="flex flex-wrap gap-2">
+                {spec.samples && <ReadinessChip {...SAMPLES[spec.samples]} />}
+                {spec.impact && <ReadinessChip {...IMPACT[spec.impact]} />}
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
               <span>spec v{spec.version}</span>
               <span>·</span>

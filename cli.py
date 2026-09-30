@@ -49,6 +49,7 @@ from blueprint.review import (
     DiscoverySpec,
     ReviewAction,
     ReviewDecision,
+    SpecSummary,
     SpecSummaryError,
     compile_spec,
     review_status,
@@ -274,14 +275,14 @@ async def cmd_review(
     skills = load_skills()
     decisions = [ReviewDecision.from_dict(d) for d in snapshot.get("reviews", [])]
     version = len(decisions) + 1
-    title = narrative = None
+    summary = None
     if summarize:
         cats = compile_spec(snapshot, skills, version=version).categories
         try:
-            title, narrative = await summarize_spec(cats, model=settings.model)
+            summary = await summarize_spec(cats, model=settings.model)
         except SpecSummaryError as exc:
             print(f"  (title/narrative fallback: {exc})", file=sys.stderr)
-    spec = compile_spec(snapshot, skills, version=version, title=title, narrative=narrative)
+    spec = compile_spec(snapshot, skills, version=version, summary=summary)
     _print_spec(spec)
     print(f"\nreview status: {review_status(decisions)}")
 
@@ -355,8 +356,7 @@ async def cmd_build(settings: Settings, *, run_file: Path, force: bool) -> int:
         snapshot,
         skills,
         version=int(stored["version"]) if stored else 1,
-        title=stored["title"] if stored else None,
-        narrative=stored["narrative"] if stored else None,
+        summary=SpecSummary.from_stored(stored),
     )
     try:
         template = select_template(spec)

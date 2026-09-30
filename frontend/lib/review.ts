@@ -42,6 +42,12 @@ export type Spec = {
   session_id: string;
   title: string;
   narrative: string;
+  /**
+   * Readiness classifications, null when the spec was never summarised — and absent entirely
+   * on specs stored before they existed, so treat a missing key the same as null.
+   */
+  samples: "offered" | "unavailable" | "not_discussed" | null;
+  impact: "quantified" | "named_only" | "none_stated" | null;
   categories: SpecCategory[];
   departments: string[];
   department_rationale: string | null;

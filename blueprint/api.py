@@ -61,6 +61,7 @@ from blueprint.review import (
     DiscoverySpec,
     ReviewAction,
     ReviewDecision,
+    SpecSummary,
     SpecSummaryError,
     compile_spec,
     review_status,
@@ -645,8 +646,7 @@ def create_app(
                 snap,
                 loaded_skills,
                 version=version,
-                title=stored["title"] if stored else None,
-                narrative=stored["narrative"] if stored else None,
+                summary=SpecSummary.from_stored(stored),
             )
         except ValueError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
@@ -684,10 +684,8 @@ def create_app(
         spec = _compiled(session_id, snap)
         if summarize and not snap.get("spec"):
             try:
-                title, narrative = await summarize_spec(spec.categories, model=settings.model)
-                spec = compile_spec(
-                    snap, loaded_skills, version=spec.version, title=title, narrative=narrative
-                )
+                summary = await summarize_spec(spec.categories, model=settings.model)
+                spec = compile_spec(snap, loaded_skills, version=spec.version, summary=summary)
             except SpecSummaryError as exc:
                 logger.warning("api.review.summarize_failed", extra={"error": str(exc)})
         return {

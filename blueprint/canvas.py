@@ -124,6 +124,17 @@ CATEGORY_RUBRIC: dict[CanvasCategory, tuple[RubricElement, ...]] = {
             "The systems the process touches, by name or clear type (e.g. 'our HRIS', "
             "'Salesforce'), or an explicit statement that none are involved.",
         ),
+        # Split out from systems_named deliberately. The risk gate runs two rules over this
+        # category — named_integration and writes_to_system — and the second decides whether a
+        # reviewer gets extra scrutiny. Before this element existed the gate had to *infer*
+        # write access from whatever verbs the stakeholder happened to use, which is how
+        # writes_to_system reached recall 0.00 while a drifting noun list hid it. Asking is
+        # cheaper than inferring, and it is a question a stakeholder can actually answer.
+        RubricElement(
+            "access_mode",
+            "Whether those systems are only read from, or also written into (records created "
+            "or updated), or an explicit statement that no systems are involved.",
+        ),
     ),
     CanvasCategory.INPUT_SOURCE: (
         RubricElement(

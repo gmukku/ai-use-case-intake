@@ -49,6 +49,18 @@
     "Everyone" is not an answer to either half. A checker that accepts this accepts anything.
   summary: Basically everyone in the company touches it at some point.
 
+- id: stakeholders_explicit_no_dependents
+  category: key_stakeholders
+  expect_missing: []
+  note: |
+    The rubric says an element is satisfied by explicitly ruling it out, and until now nothing
+    tested that for dependents. The failure this guards against is the expensive one: nagging
+    a stakeholder who has already given a complete answer, which is how a discovery
+    conversation earns a reputation for wasting people's time.
+  summary: |
+    Two benefits coordinators run it end to end, and nobody downstream depends on it — the
+    output just goes into the employee file in case we are ever audited.
+
 # --- key_activities -----------------------------------------------------------------------
 
 - id: activities_complete
@@ -126,23 +138,49 @@
 - id: systems_named_products
   category: system_integrations
   expect_missing: []
-  note: Products named; nothing left to ask.
+  note: |
+    Products named, and each one's direction with them: "arrive through" and "reads" are
+    reads, "go to" is a write. access_mode does not require the words read or write, only
+    that the direction is recoverable.
   summary: Forms arrive through Greenhouse, signed copies go to SharePoint, payroll reads ADP.
+
+- id: systems_named_without_direction
+  category: system_integrations
+  expect_missing: [access_mode]
+  note: |
+    The case the split exists for. Two real products, no hint whether either is written into.
+    Before access_mode this scored as complete, and the risk gate was left to guess from
+    vocabulary — which is the failure that put writes_to_system at recall 0.00.
+  summary: It touches Workday and Salesforce.
+
+- id: systems_read_only
+  category: system_integrations
+  expect_missing: []
+  note: |
+    Complete *and* the answer that should keep scrutiny off. A read-only integration is a
+    materially different risk from a write, and the reviewer can only see that if the spec
+    says so.
+  summary: |
+    It only ever reads — we pull the current benefit elections out of Workday and never write
+    anything back into it.
 
 - id: systems_vague_our_system
   category: system_integrations
   expect_missing: [systems_named]
   note: |
     "Our system" is exactly what a reviewer sent a spec back for in step 5. The checker
-    should have caught it before the reviewer had to.
+    should have caught it before the reviewer had to. access_mode is *not* missing here: "ends
+    up in" states a write plainly. The two elements are independent, and a checker that fails
+    both because one is vague is over-reporting.
   summary: The data ends up in our system eventually.
 
 - id: systems_explicit_none
   category: system_integrations
   expect_missing: []
   note: |
-    "Nothing else is involved" is a complete answer, not a gap. A checker that treats an
-    explicit none as missing would loop forever asking for a system that does not exist.
+    "Nothing else is involved" is a complete answer, not a gap, and it answers both elements
+    at once — there is no system whose access mode could be described. A checker that treats
+    an explicit none as missing would loop forever asking for a system that does not exist.
   summary: Nothing else is involved; it is all in one shared folder.
 
 # --- input_source -------------------------------------------------------------------------
@@ -162,6 +200,16 @@
     "Somewhere" is not a source.
   summary: The reference documents are around somewhere, I would have to check.
 
+- id: source_explicit_none
+  category: input_source
+  expect_missing: []
+  note: |
+    The other untested "explicit none". Self-contained inputs are a real and common answer —
+    it means the Builder needs no retrieval at all, which is a smaller prototype, not a gap.
+  summary: |
+    No external references needed; everything required to check a packet is inside the packet
+    itself.
+
 # --- input_types --------------------------------------------------------------------------
 
 - id: types_with_samples
@@ -179,6 +227,29 @@
     Types are clear, no samples offered or discussed. The Builder needs real examples, so
     this is a genuine follow-up rather than pedantry.
   summary: Mostly document uploads — scanned PDFs of the completed forms.
+
+- id: types_samples_offered_without_types
+  category: input_types
+  expect_missing: [types_selected]
+  note: |
+    The only rubric element with no missing-case until now — eleven of twelve had one, this
+    did not, so it could have been broken with the suite still green. Same shape as the three
+    risk rules that sat at recall 0.00. Samples are plainly offered; what the input actually
+    *is* never gets said.
+  summary: |
+    I can send over a few real examples of what we get, whatever form they happen to arrive in.
+
+- id: types_samples_refused
+  category: input_types
+  expect_missing: []
+  note: |
+    samples_discussed reads "asked and answered", so a refusal satisfies it — and this is the
+    boundary that wording exists for, previously untested. It is not a gap to chase: no amount
+    of follow-up produces a packet full of SSNs. It *is* something the Builder must know,
+    which is a rendering problem rather than a completeness one.
+  summary: |
+    Document uploads, scanned PDFs of the completed forms. I cannot share real ones — they
+    have Social Security numbers on them.
 
 # --- output_format ------------------------------------------------------------------------
 

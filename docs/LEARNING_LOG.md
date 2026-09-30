@@ -682,6 +682,49 @@ check accept a per-model `VERTEX_REGION_CLAUDE_*` override instead of the global
 The env var names were read out of the bundled CLI binary rather than recalled, which is the
 `FastMCP` lesson applied before it could cost anything. *`blueprint/settings.py`*
 
+### Ask the question the gate depends on, rather than inferring it
+`system_integrations` had one rubric element, `systems_named`, so "Salesforce" and "we write
+into Salesforce nightly" scored identically. But the risk gate runs *two* rules over that same
+text, and `writes_to_system` decides whether a reviewer gets extra scrutiny — so the gate was
+left inferring write access from whatever verbs a stakeholder happened to reach for. That is
+exactly how it reached recall 0.00 while `named_integration` quietly covered the hole.
+
+Splitting out `access_mode` moves the question from inference to discovery. The cost is
+honest: one more element the checker can nudge for, so conversations get marginally longer.
+Worth it, because the gate's false negatives are the measure CLAUDE.md names, and a rule that
+infers from vocabulary fails silently while its tests pass.
+
+Adding the element needed no checker code at all — the enum, the prompt and the validation are
+all derived from `CATEGORY_RUBRIC`. Second time that abstraction has paid, after the SQLite
+store swap cost zero route changes. *`blueprint/canvas.py`*
+
+### An element with no failing case has not been tested
+Eleven of twelve rubric elements had at least one eval case expecting them missing.
+`types_selected` had none, so it could have been broken with the suite green — the same shape
+as the three risk rules at recall 0.00, found the same way: by counting coverage per element
+instead of counting cases. Two more holes came out of the same count: the "explicit none" path
+was tested for one of the three elements that document it, and `samples_discussed`'s refusal
+case — the boundary its own wording exists for — had never been exercised.
+
+Counting cases said 21, which sounds thorough. Counting *elements with a negative case* said
+11 of 12, which is the number that meant something. *`evals/completeness/cases.yaml`*
+
+### A classification is not a gap, and should not be rendered as one
+A refusal to supply samples and a promise to send two redacted packets both satisfy
+`samples_discussed`, correctly — the question was answered. They also leave the Builder in
+completely different positions, and the reviewer had to read the canvas prose to tell. Same for
+a named metric with no number.
+
+The fix was not to tighten the rubric, which would have started a follow-up nobody can answer
+("please quantify"), but to say *what the answer was*. It rides on the `summarize_spec` call
+that already exists and already has every category summary in front of it: two enum fields, no
+new call, no new cost. A phrase list would have drifted exactly like `writes_to_system`'s did.
+
+`SpecSummary.from_stored` drops a value that is not in the allowed set rather than trusting it,
+because `runs/` holds specs written by more than one version of this program — the twelve
+drifting keys again, handled at the boundary this time instead of after a crash.
+*`blueprint/review.py`*, *`frontend/app/components/ReviewDetail.tsx`*
+
 ---
 
 ## Mistakes and what they taught

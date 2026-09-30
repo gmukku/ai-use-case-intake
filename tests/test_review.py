@@ -10,6 +10,7 @@ from blueprint.review import (
     ReviewAction,
     ReviewDecision,
     RiskLevel,
+    SpecSummary,
     SpecSummaryError,
     assess_risk,
     compile_spec,
@@ -205,9 +206,43 @@ class TestCompileSpec:
         assert spec.risk.level is RiskLevel.ELEVATED
         assert spec.turns == 9 and spec.total_cost_usd == 0.15
 
-    def test_title_and_narrative_overrides(self) -> None:
-        spec = compile_spec(snapshot(), SKILLS, title="Packet checker", narrative="Two sentences.")
+    def test_summary_overrides_the_deterministic_text(self) -> None:
+        spec = compile_spec(
+            snapshot(),
+            SKILLS,
+            summary=SpecSummary(
+                title="Packet checker",
+                narrative="Two sentences.",
+                samples="unavailable",
+                impact="named_only",
+            ),
+        )
         assert spec.title == "Packet checker" and spec.narrative == "Two sentences."
+        assert spec.samples == "unavailable" and spec.impact == "named_only"
+
+    def test_without_a_summary_the_classifications_are_unknown_not_guessed(self) -> None:
+        # None, never a default like "not_discussed": nothing has read the conversation, so
+        # the honest answer is that we do not know, and the reviewer sees nothing rather than
+        # a claim.
+        spec = compile_spec(snapshot(), SKILLS)
+        assert spec.samples is None and spec.impact is None
+
+    def test_a_stored_spec_round_trips_and_survives_a_missing_field(self) -> None:
+        stored = compile_spec(
+            snapshot(),
+            SKILLS,
+            summary=SpecSummary("T", "N", samples="offered", impact="quantified"),
+        ).to_dict()
+        assert SpecSummary.from_stored(stored) == SpecSummary("T", "N", "offered", "quantified")
+
+        # A spec written before these fields existed, and one holding a value no longer in the
+        # allowed set. Both must read back rather than raise; `runs/` holds specs from more
+        # than one version of this program.
+        assert SpecSummary.from_stored({"title": "T", "narrative": "N"}) == SpecSummary("T", "N")
+        unknown_value = SpecSummary.from_stored({**stored, "samples": "maybe"})
+        assert unknown_value is not None and unknown_value.samples is None
+        assert SpecSummary.from_stored(None) is None
+        assert SpecSummary.from_stored({}) is None
 
     def test_check_off_means_sufficiency_unknown(self) -> None:
         spec = compile_spec(snapshot(check=False), SKILLS)
@@ -240,13 +275,16 @@ class TestSummarizeSpec:
                 structured_output={
                     "title": "Packet checker for HR Ops.",
                     "narrative": "A tool that flags missing items in onboarding packets.",
+                    "samples": "offered",
+                    "impact": "quantified",
                 },
             )
 
         spec = compile_spec(snapshot(), SKILLS)
-        title, narrative = await summarize_spec(spec.categories, query_fn=q)
-        assert title == "Packet checker for HR Ops"  # trailing period stripped
-        assert narrative.startswith("A tool that flags")
+        summary = await summarize_spec(spec.categories, query_fn=q)
+        assert summary.title == "Packet checker for HR Ops"  # trailing period stripped
+        assert summary.narrative.startswith("A tool that flags")
+        assert summary.samples == "offered" and summary.impact == "quantified"
 
     async def test_failure_is_typed(self) -> None:
         async def q(*, prompt: str, options: Any) -> AsyncIterator[Any]:

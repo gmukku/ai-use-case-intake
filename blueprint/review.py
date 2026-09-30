@@ -378,6 +378,10 @@ class DiscoverySpec:
     session_id: str
     title: str
     narrative: str
+    samples: str | None
+    """One of :data:`SAMPLE_STATES`; see :class:`SpecSummary`. ``None`` when unsummarised."""
+    impact: str | None
+    """One of :data:`IMPACT_STATES`; see :class:`SpecSummary`. ``None`` when unsummarised."""
     categories: tuple[SpecCategory, ...]
     departments: tuple[str, ...]
     department_rationale: str | None
@@ -396,6 +400,8 @@ class DiscoverySpec:
             "session_id": self.session_id,
             "title": self.title,
             "narrative": self.narrative,
+            "samples": self.samples,
+            "impact": self.impact,
             "categories": [c.to_dict() for c in self.categories],
             "departments": list(self.departments),
             "department_rationale": self.department_rationale,
@@ -407,6 +413,61 @@ class DiscoverySpec:
             "total_cost_usd": self.total_cost_usd,
             "compiled_at": self.compiled_at.isoformat(),
         }
+
+
+SAMPLE_STATES: Final = ("offered", "unavailable", "not_discussed")
+IMPACT_STATES: Final = ("quantified", "named_only", "none_stated")
+
+
+@dataclass(frozen=True, slots=True)
+class SpecSummary:
+    """The model-written parts of a spec, kept together so a stored one round-trips whole.
+
+    ``samples`` and ``impact`` are classifications, not gaps. Both questions are *answered*
+    under the rubric — "I cannot share real packets, they have SSNs on them" satisfies
+    ``samples_discussed``, and a named metric with no number satisfies ``measurable_impact`` —
+    but a refusal and a promise put the Builder in entirely different positions, and a metric
+    with no baseline cannot show whether the prototype helped. The completeness gate has no
+    reason to care; a reviewer reading a queue does, and previously had to infer both from
+    prose.
+    """
+
+    title: str
+    narrative: str
+    samples: str | None = None
+    """One of :data:`SAMPLE_STATES`, or ``None`` when the summariser did not run."""
+    impact: str | None = None
+    """One of :data:`IMPACT_STATES`, or ``None`` when the summariser did not run."""
+
+    @classmethod
+    def from_stored(cls, stored: Mapping[str, Any] | None) -> SpecSummary | None:
+        """Rebuild from a persisted spec, or ``None`` if there is nothing stored.
+
+        Tolerant on purpose: specs written before these fields existed are still readable, and
+        a value that is not in the allowed set is dropped rather than trusted. Stored JSON has
+        been through more than one version of this program.
+        """
+        if not stored:
+            return None
+        title = str(stored.get("title") or "")
+        narrative = str(stored.get("narrative") or "")
+        if not title and not narrative:
+            return None
+        return cls(
+            title=title,
+            narrative=narrative,
+            samples=_one_of(stored.get("samples"), SAMPLE_STATES),
+            impact=_one_of(stored.get("impact"), IMPACT_STATES),
+        )
+
+
+def _one_of(value: object, allowed: tuple[str, ...]) -> str | None:
+    """Return ``value`` when it is one of ``allowed``, else ``None``.
+
+    ``object`` rather than ``Any``: the caller is handing over parsed JSON, and ``object``
+    forces the isinstance check instead of letting an unchecked value through.
+    """
+    return value if isinstance(value, str) and value in allowed else None
 
 
 def _latest_assessments(snapshot: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -422,10 +483,13 @@ def compile_spec(
     skills: Mapping[str, DepartmentSkill],
     *,
     version: int = 1,
-    title: str | None = None,
-    narrative: str | None = None,
+    summary: SpecSummary | None = None,
 ) -> DiscoverySpec:
     """Assemble the spec from a session snapshot. No model call; see :func:`summarize_spec`.
+
+    ``summary`` carries everything a model wrote — title, narrative, and the two readiness
+    classifications. One parameter rather than four because they are produced together, stored
+    together, and are either all present or all absent.
 
     Raises:
         ValueError: if the snapshot's canvas is not complete.
@@ -486,8 +550,11 @@ def compile_spec(
     spec = DiscoverySpec(
         version=version,
         session_id=str(snapshot.get("session_id") or ""),
-        title=title or (first_user[:80].rstrip() + ("…" if len(first_user) > 80 else "")),
-        narrative=narrative or last_assistant,
+        title=(summary.title if summary else "")
+        or (first_user[:80].rstrip() + ("…" if len(first_user) > 80 else "")),
+        narrative=(summary.narrative if summary else "") or last_assistant,
+        samples=summary.samples if summary else None,
+        impact=summary.impact if summary else None,
         categories=categories,
         departments=tuple(match.get("departments", [])),
         department_rationale=match.get("rationale"),
@@ -527,8 +594,25 @@ SUMMARY_SCHEMA: Final[dict[str, Any]] = {
             "description": "Two plain-language sentences: what the stakeholder wants and for "
             "whom, and what the prototype would produce.",
         },
+        # Classifications, not gaps. The completeness rubric counts both of these as answered;
+        # these say *what* the answer was, which is what changes a reviewer's decision.
+        "samples": {
+            "type": "string",
+            "enum": list(SAMPLE_STATES),
+            "description": "Whether real sample inputs can be provided. 'offered' if the "
+            "stakeholder said they can supply examples; 'unavailable' if they said they "
+            "cannot, for any reason including privacy or none existing; 'not_discussed' if it "
+            "never came up.",
+        },
+        "impact": {
+            "type": "string",
+            "enum": list(IMPACT_STATES),
+            "description": "How measurable the stated value is. 'quantified' if a current "
+            "number, volume or target appears; 'named_only' if a metric is named with no "
+            "number attached; 'none_stated' if neither.",
+        },
     },
-    "required": ["title", "narrative"],
+    "required": ["title", "narrative", "samples", "impact"],
     "additionalProperties": False,
 }
 
@@ -538,8 +622,13 @@ async def summarize_spec(
     *,
     model: str = DEFAULT_SPEC_MODEL,
     query_fn: QueryFn = query,
-) -> tuple[str, str]:
-    """One small structured-output call for the queue-facing title and narrative.
+) -> SpecSummary:
+    """One small structured-output call for the queue-facing summary.
+
+    Returns the title and narrative, plus the two readiness classifications — one call rather
+    than three, because the model already has every category summary in front of it and the
+    alternatives were worse: a phrase list would drift the way ``writes_to_system``'s did, and
+    a second call would pay twice for the same context.
 
     Raises:
         SpecSummaryError: on failure; callers fall back to the deterministic defaults.
@@ -572,7 +661,12 @@ async def summarize_spec(
     except jsonschema.ValidationError as exc:
         raise SpecSummaryError(exc.message) from exc
     assert isinstance(payload, dict)
-    return str(payload["title"]).strip().rstrip("."), str(payload["narrative"]).strip()
+    return SpecSummary(
+        title=str(payload["title"]).strip().rstrip("."),
+        narrative=str(payload["narrative"]).strip(),
+        samples=_one_of(payload.get("samples"), SAMPLE_STATES),
+        impact=_one_of(payload.get("impact"), IMPACT_STATES),
+    )
 
 
 class SpecSummaryError(RuntimeError):
