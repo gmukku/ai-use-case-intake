@@ -46,8 +46,9 @@ from evals._harness import (
     by_variant,
     confirm_spend,
     print_table,
+    results_path,
     timing_and_cost,
-    write_results,
+    write_results_to,
 )
 from evals.e2e.simulator import (
     DEFAULT_SIMULATOR_MODEL,
@@ -287,6 +288,10 @@ async def main() -> int:
         return 0
 
     skills = load_skills()
+    # Reserved before the first conversation, and rewritten after each one. The first run of
+    # this suite completed all six conversations and then lost every transcript to a path bug
+    # on the final line -- $1.27 of work discarded by a write that only happened once.
+    out = results_path(HERE)
     results: list[ConversationResult] = []
     # Sequentially, not concurrently: each live session holds its own CLI subprocess at
     # roughly 226 MB, and six at once is most of a small machine's memory for no gain on a
@@ -303,6 +308,8 @@ async def main() -> int:
                     skills=skills,
                 )
             )
+            # After every conversation, so a crash costs one rather than all of them.
+            write_results_to(out, summarize(results), [asdict(r) for r in results])
 
     summary = summarize(results)
     print_table(
@@ -326,8 +333,8 @@ async def main() -> int:
     )
     print_detail(results)
 
-    path = write_results(HERE / "results", summary, [asdict(r) for r in results])
-    print(f"results: {path}")
+    write_results_to(out, summary, [asdict(r) for r in results])
+    print(f"results: {out}")
     print(f"total spend: ${sum(r.cost_usd or 0.0 for r in results):.3f}")
 
     # Non-zero on a false negative, matching the risk_gate suite: an unflagged write into a

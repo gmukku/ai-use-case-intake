@@ -119,9 +119,15 @@ _NONE_RE: Final = re.compile(
 # department skills name (BambooHR, Greenhouse, QuickBooks, ServiceNow…) and 8 of the generic
 # types in _GENERIC_SYSTEMS were invisible here, while `named_integration` matched them all.
 # The targets now come from those same two sources, so the two rules cannot diverge again.
+# Past and passive forms are included because that is how people describe systems: "the
+# record *is created* in Coupa", "invoices *are posted* to NetSuite". The e2e eval found this
+# — a persona whose ground truth plainly describes a write raised no flag, because every verb
+# in it was past tense. Same shape as the noun-list drift that put this rule at recall 0.00:
+# the vocabulary the rule knew was narrower than the vocabulary stakeholders use.
 _WRITE_VERB_RE: Final = re.compile(
-    r"\b(writ(?:e|es|ing)|updat(?:e|es|ing)|push(?:es|ing)?|sync(?:s|ing)?|post(?:s|ing)?|"
-    r"enter(?:s|ing)?|creat(?:e|es|ing)|modif(?:y|ies|ying)|submit(?:s|ting)?)\b",
+    r"\b(writ(?:e|es|ing)|written|updat(?:e|es|ed|ing)|push(?:es|ed|ing)?|sync(?:s|ed|ing)?|"
+    r"post(?:s|ed|ing)?|enter(?:s|ed|ing)?|creat(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|"
+    r"submit(?:s|ted|ting)?)\b",
     re.IGNORECASE,
 )
 # How far past the verb a target still reads as its object. A clause break ends the search:

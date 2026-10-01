@@ -42,7 +42,10 @@ from blueprint.isolation import AGENT_ENV
 QueryFn = Callable[..., AsyncIterator[Message]]
 
 DEFAULT_SIMULATOR_MODEL = "claude-opus-5"
-DEFAULT_MAX_TURNS = 12
+# Measured: the first real run completed in about eleven turns against a cap of twelve,
+# which is close enough that a slightly chattier conversation would hit the cap and be
+# reported as incomplete. Raising it costs nothing for a conversation that completes.
+DEFAULT_MAX_TURNS = 18
 
 VALID_CATEGORIES = {c.value for c in CanvasCategory}
 

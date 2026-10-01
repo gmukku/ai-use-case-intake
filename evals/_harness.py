@@ -106,18 +106,39 @@ def by_variant[R: HasVariant](results: Sequence[R]) -> dict[str, list[R]]:
     return grouped
 
 
+def results_path(suite_dir: Path) -> Path:
+    """Reserve a timestamped output file, creating the directory if it is not there.
+
+    ``parents=True`` because a new suite's ``results/`` has no parent until its first run, and
+    the crash that taught this discarded a whole paid run at the final line.
+    """
+    results_dir = suite_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    return results_dir / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+
+
+def write_results_to(
+    path: Path, summary: dict[str, dict[str, Any]], results: Sequence[Any]
+) -> Path:
+    """Write a run to an exact path. Safe to call repeatedly as a run progresses.
+
+    An expensive suite should call this after every case rather than once at the end: a run
+    that writes its only artifact on the last line loses everything to any failure there, and
+    the transcripts are usually what the run was bought for.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"summary": summary, "results": list(results)}, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return path
+
+
 def write_results(
     suite_dir: Path, summary: dict[str, dict[str, Any]], results: Sequence[Any]
 ) -> Path:
     """Write the run where the dashboard and `blueprint.eval_runs` will find it."""
-    results_dir = suite_dir / "results"
-    results_dir.mkdir(exist_ok=True)
-    out = results_dir / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
-    out.write_text(
-        json.dumps({"summary": summary, "results": list(results)}, indent=2, default=str),
-        encoding="utf-8",
-    )
-    return out
+    return write_results_to(results_path(suite_dir), summary, results)
 
 
 def print_table(summary: dict[str, dict[str, Any]], rows: Sequence[tuple[str, str]]) -> None:

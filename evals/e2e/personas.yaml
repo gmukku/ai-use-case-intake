@@ -175,9 +175,11 @@ personas:
     style: >
       Enthusiastic but unspecific. Answers questions with questions, and asks for examples
       constantly. Gives a real answer only when asked something concrete and narrow.
-    expect_flags: []
+    # Its own ground truth names Intercom, so named_integration fires and must be expected.
+    # Labelled [] originally; the static reachability check caught it for free.
+    expect_flags: [named_integration]
     expect_departments: [customer_success]
-    max_turns: 16
+    max_turns: 22
     facts:
       key_stakeholders: >
         The customer success team, about nine people. Eventually the customers, I suppose.

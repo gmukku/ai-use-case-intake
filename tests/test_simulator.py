@@ -106,6 +106,26 @@ class TestShippedPersonas:
             unknown = set(p.expect_flags) - known
             assert not unknown, f"{p.id} expects unknown flag(s): {sorted(unknown)}"
 
+    def test_expected_flags_are_reachable_from_the_personas_own_facts(self) -> None:
+        """A persona must not expect a flag its own ground truth cannot raise.
+
+        Free, deterministic, and it would have saved a paid run. One persona expected
+        `writes_to_system` from facts the rule could not match -- every verb in them was past
+        tense -- which would have reported a false negative on every run forever, for a rule
+        that was never going to fire on that wording. Another expected no flags while naming
+        Intercom. Both were caught by running `assess_risk` over the fixtures themselves.
+        """
+        from blueprint.review import assess_risk
+        from blueprint.skills import load_skills
+
+        skills = load_skills()
+        for p in load_personas(PERSONAS):
+            risk = assess_risk(dict(p.facts), open_gaps={}, web_searches=0, skills=skills)
+            unreachable = sorted(set(p.expect_flags) - {f.key for f in risk.flags})
+            assert not unreachable, (
+                f"{p.id}: expects {unreachable}, which its own ground truth does not raise"
+            )
+
     def test_the_set_covers_both_sides_of_the_risk_gate(self) -> None:
         # A suite where every persona expects a flag cannot detect a gate that flags
         # everything, and one where none do cannot detect a gate that flags nothing.

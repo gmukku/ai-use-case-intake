@@ -835,6 +835,56 @@ request, and someone who has not thought it through. Six that differ in what the
 do beat twenty that differ only in industry.
 *`evals/e2e/simulator.py`*, *`evals/e2e/personas.yaml`*
 
+### An expensive run that writes its artifact once, at the end, writes it never
+The first real e2e run finished all six conversations, scored them, printed the table, and
+then died on the final line: `write_results` appends `results/` to the directory it is given
+and I had passed `HERE / "results"`, so it tried to create `results/results` under a parent
+that did not exist.
+
+The numbers survived in stdout. The transcripts did not, and the transcripts were most of why
+the run was bought -- they are the input for the gold specs the remaining measure needs. $1.27
+and about fifteen minutes, discarded by a path typo at the last statement.
+
+The typo is the small half. The design fault is that a run costing real money wrote its only
+artifact once, after everything, so any failure there loses all of it. It now reserves the
+output path *before* the first conversation and rewrites it after each one, so a crash costs
+one conversation instead of six. `mkdir` also gained `parents=True`, because a new suite's
+`results/` has no parent until its first run -- a trap set for whoever adds the next suite.
+
+The general rule, which generalises past evals: when work is expensive to produce and cheap to
+save, save it as it is produced. *`evals/_harness.py`*, *`evals/e2e/run.py`*
+
+### The eval found a false negative in the rule it was built to check
+`writes_to_system` matches present-tense verbs only -- `creat(?:e|es|ing)`, so "create" and
+"creating" but not "created". The vendor persona's ground truth says "the vendor record **is
+created** in Coupa and the payment details **get set up** in NetSuite", which is a write in
+any human reading and raised nothing.
+
+This is the same shape as the drift that put the rule at recall 0.00 once before: the
+vocabulary the rule knows is narrower than the vocabulary stakeholders use, and the gap is
+invisible to tests written from the implementation. Past and passive forms are how people
+describe systems of record -- "invoices are posted to", "the record is updated in" -- and they
+were all missing.
+
+Fixed by adding past and passive forms, and verified against the deterministic risk_gate suite
+for free: still 100% recall, zero false negatives, zero spurious. The fix was found by the
+expensive suite and confirmed by the cheap one, which is the right division of labour.
+
+Worth noting what did *not* happen: the paid run reported zero missed flags, because the
+agent's own phrasing of the same facts happened to trip the rule. The bug was only visible by
+running `assess_risk` over the fixtures directly -- a free check I should have run before
+spending anything. *`blueprint/review.py`*
+
+### Check the fixtures against the code before paying to check the code
+Two persona labels were wrong, and a four-line script found both for nothing: one expected a
+flag its own facts could not raise, the other expected no flags while naming Intercom in its
+ground truth. The first is the costly kind -- it reports a false negative on every run,
+forever, for a rule that was never going to fire on that wording.
+
+That check is now a test. The pattern generalises: when a fixture asserts something about the
+system under test, the assertion can usually be evaluated against the system directly, before
+any of it is paid for. *`tests/test_simulator.py`*
+
 ### The isolation scanner was only looking where the bugs used to be
 `tests/test_isolation.py` walks every `ClaudeAgentOptions(` in the package and requires
 `setting_sources=[]` and `env=AGENT_ENV`. The simulator is an agent, spawns a CLI subprocess
@@ -1052,10 +1102,10 @@ prototype should be (decided per output format in step 6).
   the real backend end to end, so the contract between `lib/api.ts` and `blueprint.api` is
   asserted twice independently and agreed nowhere. A change to the SSE frame shape would pass
   both suites.
-- **The e2e eval has never been run.** `evals/e2e/` drives whole conversations against
-  simulated stakeholders, and everything deterministic about it is unit-tested, but no paid
-  run has happened — so the conversation loop itself is unproven against a live session, and
-  the personas have never been shown to be answerable by a real agent. First run is ~$2.40.
+- **The e2e eval has run once, and its transcripts were lost to a writer bug.** Six
+  conversations, 0 missed risk flags, 5 of 6 complete, $1.27. The loop and the personas are
+  proven; the artifacts are not kept, so the gold specs still have no input. A re-run after
+  the write-path and turn-cap fixes is ~$1.30.
 - **The e2e eval scores two of CLAUDE.md's four measures.** Discovery completeness and the
   risk-gate false-negative check are deterministic and done. The rubric-scored judge
   comparison against a gold spec (completeness / accuracy / actionability) is not built; it
