@@ -1064,18 +1064,13 @@ prototype should be (decided per output format in step 6).
 
 ### Correctness and coverage
 
-- **Two of CLAUDE.md's four eval measures are not built.** `risk_gate` covers the
-  false-negative check and `completeness` covers per-category capture quality. Still missing:
-  (a) **discovery completeness end to end** — were all seven categories actually captured over
-  a whole conversation — and (b) **example relevance** plus the **rubric-scored judge
-  comparison of a compiled spec against a gold one** (completeness / accuracy / actionability,
-  never an overall score). Both need a *stakeholder simulator*: a second model playing the
-  requester from a persona brief, because fixed reply scripts break as soon as the agent adapts
-  its questions. Roughly $0.30 per case including the judge, so a 20-case run is $6–8 — a real
-  decision rather than a default, which is why it is here and not done.
-- **The requester view has no automated tests.** The backend has 434; the React has a type
-  checker and a linter. Every UI bug in this project was found by clicking. Playwright against
-  the real API would have caught the sticky-composer overlap and the locked-out composer.
+- **One of CLAUDE.md's four eval measures is not built.** `risk_gate` covers the
+  false-negative check, `completeness` covers per-category capture quality, and `e2e` covers
+  discovery completeness over a whole conversation against a simulated stakeholder. Still
+  missing: **example relevance**, and the **rubric-scored judge comparison of a compiled spec
+  against a gold one** (completeness / accuracy / actionability, never an overall score). That
+  one needs a hand-written gold spec per persona, and the right input for writing them is a
+  set of real transcripts — which the first e2e run produced and then lost (below).
 - **Requester 👍/👎 as judge-validation labels** needs enough real feedback to be worth
   anything. Two ratings exist so far.
 
